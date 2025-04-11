@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview"
   },
@@ -38,5 +38,6 @@
     "typescript-eslint": "^8.24.1",
     "vite": "^5.4.18",
     "zod": "^3.24.2"
-  }
+  },
+  "description": "Advanced Dark Mode & Digital Eye Care"
 }

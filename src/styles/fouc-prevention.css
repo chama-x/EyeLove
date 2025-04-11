@@ -1,0 +1,8 @@
+/* src/styles/fouc-prevention.css */
+/* Extremely minimal CSS injected at document_start to prevent white flash */
+html.eyelove-dark-theme-active {
+    background-color: #121212 !important; /* Example dark background */
+    color-scheme: dark; /* Hint to browser about dark theme */
+  }
+  
+  /* Add other absolutely critical base styles here if needed, keep minimal */
