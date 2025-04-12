@@ -1,9 +1,17 @@
 // src/content-scripts/main.ts
 // Injected at document_idle (or later)
 
-import { SettingsSchema, parseMessage } from '~/lib/schemas.ts';
+import { SettingsSchema, parseMessage } from '../lib/schemas';
 import * as culori from 'culori'; // Import the culori library
-type Oklch = { mode: "oklch"; l: number; c: number; h: number; alpha?: number };
+
+// Define Oklch type to match culori's internal type structure
+interface Oklch {
+  mode: "oklch";
+  l: number;
+  c: number;
+  h?: number; // Keep h optional to match culori's type definition
+  alpha?: number;
+}
 
 // Store original element inline styles for proper restoration
 const elementOriginalStyles = new WeakMap<HTMLElement, string | null>();
@@ -13,6 +21,126 @@ let domObserver: MutationObserver | null = null;
 
 const BODY_CLASS_DARK_ENABLED = 'eyelove-dark-mode-enabled';
 const isDev = process.env.NODE_ENV === 'development';
+
+// Target WCAG AA contrast ratio (4.5:1 for normal text)
+const TARGET_CONTRAST = 4.5;
+// Maximum iterations for contrast adjustment
+const MAX_CONTRAST_ITERATIONS = 10;
+
+// == WCAG Contrast Utility Functions ==
+
+/**
+ * Calculate relative luminance from an OKLCH color object
+ * Uses the formula Y = 0.2126*R + 0.7152*G + 0.0722*B
+ * 
+ * @param oklchColor The OKLCH color object
+ * @returns The relative luminance (0-1), or 0 if conversion fails
+ */
+function getRelativeLuminance(oklchColor: Oklch): number {
+  try {
+    // Ensure h exists with fallback to 0
+    const color = {
+      ...oklchColor,
+      h: oklchColor.h ?? 0
+    };
+    
+    // Convert OKLCH to RGB
+    const rgb = culori.rgb(color);
+    
+    if (!rgb) return 0;
+    
+    // Calculate relative luminance using the formula from WCAG 2.0
+    return 0.2126 * rgb.r + 0.7152 * rgb.g + 0.0722 * rgb.b;
+  } catch (e) {
+    if (isDev) console.warn('[EyeLove CS] Error calculating luminance:', e);
+    return 0;
+  }
+}
+
+/**
+ * Calculate contrast ratio between two luminance values
+ * 
+ * @param luminance1 First luminance value (0-1)
+ * @param luminance2 Second luminance value (0-1)
+ * @returns Contrast ratio (1-21)
+ */
+function calculateContrastRatio(luminance1: number, luminance2: number): number {
+  if (luminance1 === undefined || luminance2 === undefined) return 1;
+  
+  const lighterLuminance = Math.max(luminance1, luminance2);
+  const darkerLuminance = Math.min(luminance1, luminance2);
+  
+  return (lighterLuminance + 0.05) / (darkerLuminance + 0.05);
+}
+
+/**
+ * Adjust text color lightness to meet target contrast with background
+ * 
+ * @param textColorOklch The starting text color in OKLCH
+ * @param backgroundLuminance The relative luminance of the background (0-1)
+ * @param targetContrast The target contrast ratio to achieve
+ * @returns Adjusted OKLCH color object with appropriate lightness
+ */
+function adjustTextLightnessForContrast(
+  textColorOklch: Oklch, 
+  backgroundLuminance: number, 
+  targetContrast: number
+): Oklch {
+  // Handle invalid inputs
+  if (!textColorOklch || backgroundLuminance === undefined) {
+    return textColorOklch;
+  }
+  
+  // Clone the original color to avoid modifying it
+  const adjustedColor: Oklch = { 
+    mode: "oklch", 
+    l: textColorOklch.l, 
+    c: textColorOklch.c, 
+    h: textColorOklch.h 
+  };
+  
+  // Check if background is light or dark to determine direction
+  const isDarkBackground = backgroundLuminance < 0.5;
+  
+  // Initial text luminance
+  let textLuminance = getRelativeLuminance(adjustedColor);
+  if (textLuminance === undefined) return textColorOklch;
+  
+  // Initial contrast ratio
+  let currentContrast = calculateContrastRatio(backgroundLuminance, textLuminance);
+  
+  // Iteratively adjust lightness to improve contrast
+  let iterations = 0;
+  let step = 0.05; // Initial step size
+  
+  while (currentContrast < targetContrast && iterations < MAX_CONTRAST_ITERATIONS) {
+    // Adjust lightness in appropriate direction
+    if (isDarkBackground) {
+      // For dark backgrounds, make text lighter
+      adjustedColor.l = Math.min(1, adjustedColor.l + step);
+    } else {
+      // For light backgrounds, make text darker
+      adjustedColor.l = Math.max(0, adjustedColor.l - step);
+    }
+    
+    // Recalculate luminance and contrast
+    textLuminance = getRelativeLuminance(adjustedColor) || textLuminance;
+    currentContrast = calculateContrastRatio(backgroundLuminance, textLuminance);
+    
+    // Reduce step size as we get closer
+    if (iterations > 5) step = 0.025;
+    
+    iterations++;
+  }
+  
+  if (isDev && iterations >= MAX_CONTRAST_ITERATIONS) {
+    console.warn('[EyeLove CS] Max iterations reached adjusting contrast. Achieved:', currentContrast.toFixed(2));
+  } else if (isDev && iterations > 0) {
+    console.debug(`[EyeLove CS] Contrast improved from ${currentContrast.toFixed(2)} to target ${targetContrast} in ${iterations} iterations`);
+  }
+  
+  return adjustedColor;
+}
 
 // Initial list of common CSS variable names to check
 const TARGET_CSS_VARIABLES: string[] = [
@@ -110,13 +238,15 @@ function applyDarkModeStyles() {
   const t0_strategy2 = performance.now(); // Start timing Strategy 2
 
   // TODO: Refine selector later (performance) - avoid '*' initially
-  const elementSelector = 'body, div, section, article, main, header, footer, nav, aside, p, li, h1, h2, h3, h4, h5, h6, span, button, label, legend, td, th'; // Common elements
+  const elementSelector = 'body, div, section, article, main, header, footer, nav, aside, p, li, h1, h2, h3, h4, h5, h6, span, button, label, legend, td, th, svg'; // Common elements + SVG
   const elementsToCheck = document.querySelectorAll(elementSelector);
   const elementsToStyleData: Array<{
       element: Element;
       originalBg: string;
       originalColor: string;
       originalBorder: string;
+      originalFill?: string;
+      originalStroke?: string;
   }> = [];
 
   // == Read Phase (Batch DOM Reads) ==
@@ -128,6 +258,10 @@ function applyDarkModeStyles() {
           const bgColor = styles.backgroundColor;
           const color = styles.color;
           const borderColor = styles.borderTopColor; // Check one border color for simplicity
+          
+          // Add SVG-specific properties
+          const fill = styles.fill;
+          const stroke = styles.stroke;
 
           // TODO: Add smarter check: Only process if element needs styling
           // (e.g., light background OR dark text, AND not transparent/fully transparent,
@@ -138,7 +272,9 @@ function applyDarkModeStyles() {
               element: element,
               originalBg: bgColor,
               originalColor: color,
-              originalBorder: borderColor
+              originalBorder: borderColor,
+              originalFill: fill !== 'none' ? fill : undefined,
+              originalStroke: stroke !== 'none' ? stroke : undefined
           });
       } catch (e) {
           if (isDev) console.warn('[EyeLove CS] Error getting computed style for element:', element, e);
@@ -153,81 +289,222 @@ function applyDarkModeStyles() {
       try {
           let newBg: string | null = null;
           let newColor: string | null = null;
+          let newFill: string | null = null;
+          let newStroke: string | null = null;
           let finalBackgroundL = 0.2; // Default assumed dark background lightness
+          let backgroundLuminance: number | undefined;
 
           // Process Background Color
           const parsedBg = data.originalBg ? culori.parse(data.originalBg) : undefined;
-          if (parsedBg && (parsedBg.alpha ?? 1) > 0.1) { // Ignore transparent/mostly transparent
+          // --- Refined Check: Only process opaque backgrounds ---
+          if (parsedBg && (parsedBg.alpha ?? 1.0) > 0.5) { // Check if alpha is > 0.5 (adjust threshold as needed)
              const oklchBg = culori.oklch(parsedBg);
-             if (oklchBg && oklchBg.l > 0.3) { // Only darken sufficiently light backgrounds
+             // Only darken if it was originally light enough
+             if (oklchBg && oklchBg.l > 0.3) {
                  let newL = 1.0 - oklchBg.l;
                  let newC = oklchBg.c * 0.3;
                  const newH = oklchBg.h || 0;
                  newL = Math.max(0, Math.min(1, newL)); newC = Math.max(0, newC);
-                 // Store the final background lightness
-                 finalBackgroundL = newL;
-                 newBg = culori.formatHex({ mode: 'oklch', l: newL, c: newC, h: newH });
+                 finalBackgroundL = newL; // Still store lightness for text contrast check
+                 const darkOklchBg: Oklch = { mode: "oklch", l: newL, c: newC, h: newH };
+                 backgroundLuminance = getRelativeLuminance(darkOklchBg);
+                 newBg = culori.formatHex(darkOklchBg);
              } else if (oklchBg) {
-                 // Background was already dark or near-dark, use its original lightness
+                 // Original was dark or near-dark, store its lightness/luminance for text contrast check
                  finalBackgroundL = oklchBg.l;
+                 backgroundLuminance = getRelativeLuminance(oklchBg);
+                 // Do NOT set newBg - let it keep its original dark color
              }
+          } else {
+             // Background was transparent, semi-transparent, or unparseable
+             // Do NOT set newBg. Assume it should inherit or remain transparent.
+             // Estimate background luminance as dark for text contrast checks if needed.
+             finalBackgroundL = 0.2; // Default dark assumption
+             backgroundLuminance = getRelativeLuminance({ mode: 'oklch', l: finalBackgroundL, c: 0, h: 0 }); // Approx luminance
+             if (isDev && parsedBg) console.debug('[EyeLove CS] Skipping background override for (semi-)transparent element:', data.element, `alpha: ${parsedBg.alpha}`);
+          }
+          // --- End Refined Check ---
+
+          // Fallback for background luminance if still undefined
+          if (backgroundLuminance === undefined) {
+            // Estimate based on lightness
+            backgroundLuminance = finalBackgroundL < 0.5 ? 0.1 : 0.9;
           }
 
-          // Process Text Color
+          // Process Text Color with WCAG contrast enforcement
           const parsedColor = data.originalColor ? culori.parse(data.originalColor) : undefined;
           if (parsedColor && (parsedColor.alpha ?? 1) > 0.5) { // Ignore transparent text
-             const oklchColor = culori.oklch(parsedColor);
-             if (oklchColor) { // Process text color if parseable
+             const initialOklchText = culori.oklch(parsedColor);
+             if (initialOklchText) {
+                 // Get initial text luminance
+                 const initialTextLuminance = getRelativeLuminance(initialOklchText);
+                 
+                 // Calculate initial contrast
+                 let currentContrast = 1;
+                 if (initialTextLuminance !== undefined && backgroundLuminance !== undefined) {
+                   currentContrast = calculateContrastRatio(initialTextLuminance, backgroundLuminance);
+                 }
+                 
                  // Initial transformation
-                 let newL = 1.0 - oklchColor.l;
-                 let newC = oklchColor.c * 0.3; // Reduce chroma similarly
-                 const newH = oklchColor.h || 0;
-
-                 // Clamp initial values
+                 let newL = 1.0 - initialOklchText.l; // Invert lightness
+                 let newC = initialOklchText.c * 0.3; // Reduce chroma 
+                 const newH = initialOklchText.h || 0;
+                 
+                 // Basic clamping
                  newL = Math.max(0, Math.min(1, newL));
                  newC = Math.max(0, newC);
-
-                 // --- Contrast Adjustment based on Background Lightness ---
-                 if (finalBackgroundL < 0.5) {
-                     // Background is dark, ensure text is light
-                     newL = Math.max(newL, 0.75); // Force lightness >= 0.75
-                 } else {
-                     // Background is light, ensure text is dark
-                     newL = Math.min(newL, 0.25); // Force lightness <= 0.25
+                 
+                 // Create transformed text color
+                 let transformedTextColor: Oklch = { 
+                   mode: "oklch", 
+                   l: newL, 
+                   c: newC, 
+                   h: newH 
+                 };
+                 
+                 // Check contrast of the transformed color
+                 const transformedTextLuminance = getRelativeLuminance(transformedTextColor);
+                 if (transformedTextLuminance !== undefined) {
+                   currentContrast = calculateContrastRatio(transformedTextLuminance, backgroundLuminance);
+                   
+                   // If contrast doesn't meet WCAG AA standards (4.5:1), adjust it
+                   if (currentContrast < TARGET_CONTRAST) {
+                     if (isDev) console.debug(
+                       `[EyeLove CS] Insufficient contrast (${currentContrast.toFixed(2)}:1), adjusting...`
+                     );
+                     
+                     // Use helper function to improve contrast
+                     const adjustedColor = adjustTextLightnessForContrast(
+                       transformedTextColor, 
+                       backgroundLuminance, 
+                       TARGET_CONTRAST
+                     );
+                     
+                     // Replace the original transformedTextColor with the adjusted one
+                     transformedTextColor = adjustedColor;
+                   }
                  }
-                 // Re-clamp after adjustment (though likely redundant if logic is correct)
-                 newL = Math.max(0, Math.min(1, newL));
-                 // --- End Contrast Adjustment ---
-
-                 // Create final text color object
-                 const darkOklchText: Oklch = { mode: "oklch", l: newL, c: newC, h: newH };
-                 newColor = culori.formatHex(darkOklchText);
+                 
+                 // Generate final hex color from the adjusted OKLCH
+                 newColor = culori.formatHex(transformedTextColor);
              }
           }
-
-          // Removed Border Color Processing - to prevent issues with rounded corners
+          
+          // Process SVG Fill Color
+          if (data.originalFill) {
+              try {
+                  const parsedFill = culori.parse(data.originalFill);
+                  if (parsedFill && (parsedFill.alpha ?? 1) > 0.1) {
+                      const oklchFill = culori.oklch(parsedFill);
+                      if (oklchFill) {
+                          // Simple transformation (similar to text color but without contrast check)
+                          let newL = 1.0 - oklchFill.l; // Invert lightness
+                          let newC = oklchFill.c * 0.3; // Reduce chroma
+                          const newH = oklchFill.h || 0;
+                          
+                          // Basic clamping
+                          newL = Math.max(0, Math.min(1, newL));
+                          newC = Math.max(0, newC);
+                          
+                          // Apply similar contrast logic to fills (lighter for dark backgrounds, darker for light)
+                          if (finalBackgroundL < 0.5) {
+                              newL = Math.max(newL, 0.6); // Lighter fill on dark background
+                          } else {
+                              newL = Math.min(newL, 0.3); // Darker fill on light background
+                          }
+                          
+                          const darkOklchFill: Oklch = { 
+                              mode: "oklch", 
+                              l: newL, 
+                              c: newC, 
+                              h: newH 
+                          };
+                          
+                          // Generate hex color
+                          newFill = culori.formatHex(darkOklchFill);
+                      }
+                  }
+              } catch (e) {
+                  if (isDev) console.debug(`[EyeLove CS] Error processing fill color: ${data.originalFill}`, e);
+              }
+          }
+          
+          // Process SVG Stroke Color
+          if (data.originalStroke) {
+              try {
+                  const parsedStroke = culori.parse(data.originalStroke);
+                  if (parsedStroke && (parsedStroke.alpha ?? 1) > 0.1) {
+                      const oklchStroke = culori.oklch(parsedStroke);
+                      if (oklchStroke) {
+                          // Simple transformation
+                          let newL = 1.0 - oklchStroke.l; // Invert lightness
+                          let newC = oklchStroke.c * 0.2; // Reduce chroma more for strokes
+                          const newH = oklchStroke.h || 0;
+                          
+                          // Basic clamping
+                          newL = Math.max(0, Math.min(1, newL));
+                          newC = Math.max(0, newC);
+                          
+                          // Make strokes more visible based on background
+                          if (finalBackgroundL < 0.5) {
+                              newL = Math.max(newL, 0.65); // Lighter stroke on dark background
+                          } else {
+                              newL = Math.min(newL, 0.25); // Darker stroke on light background
+                          }
+                          
+                          const darkOklchStroke: Oklch = { 
+                              mode: "oklch", 
+                              l: newL, 
+                              c: newC, 
+                              h: newH 
+                          };
+                          
+                          // Generate hex color
+                          newStroke = culori.formatHex(darkOklchStroke);
+                      }
+                  }
+              } catch (e) {
+                  if (isDev) console.debug(`[EyeLove CS] Error processing stroke color: ${data.originalStroke}`, e);
+              }
+          }
 
           // Apply styles directly to the element using setProperty
           // PERF_NOTE: Writing inline styles. Causes DOM modification.
           let stylesApplied = false;
           
-          if (data.element instanceof HTMLElement) {
+          if (data.element instanceof HTMLElement || data.element instanceof SVGElement) {
               // First, store the original style but only if not already styled by us
               if (!data.element.hasAttribute('data-eyelove-styled')) {
                   const originalStyle = data.element.getAttribute('style');
-                  elementOriginalStyles.set(data.element, originalStyle);
+                  elementOriginalStyles.set(data.element as HTMLElement, originalStyle);
               }
               
               // Apply new styles
-              if (newBg) {
+              // --- Add Size Check for Background ---
+              const isSmallElement = (data.element instanceof HTMLElement) &&
+                                   (data.element.offsetHeight < 24 || data.element.offsetWidth < 24); // Example threshold
+
+              if (newBg && !isSmallElement) { // Only apply BG if NOT small
                   data.element.style.setProperty('background-color', newBg, 'important');
                   stylesApplied = true;
+              } else if (newBg && isSmallElement && isDev) {
+                  console.debug('[EyeLove CS] Skipping background override for small element:', data.element);
               }
+              // --- End Size Check ---
+
               if (newColor) {
                   data.element.style.setProperty('color', newColor, 'important');
                   stylesApplied = true;
               }
-              // Removed border-color styling
+              // Apply SVG-specific styles
+              if (newFill) {
+                  data.element.style.setProperty('fill', newFill, 'important');
+                  stylesApplied = true;
+              }
+              if (newStroke) {
+                  data.element.style.setProperty('stroke', newStroke, 'important');
+                  stylesApplied = true;
+              }
               
               // Mark the element as styled by EyeLove for later cleanup
               if (stylesApplied) {
@@ -337,9 +614,9 @@ function removeDarkModeStyles() {
       if (isDev) console.log(`[EyeLove CS] Removing inline styles from ${inlineStyledElements.length} elements`);
       
       inlineStyledElements.forEach(element => {
-          if (element instanceof HTMLElement) {
+          if (element instanceof HTMLElement || element instanceof SVGElement) {
               // Retrieve original style
-              const originalStyle = elementOriginalStyles.get(element);
+              const originalStyle = elementOriginalStyles.get(element as HTMLElement);
               
               // Restore original style state
               if (originalStyle !== undefined) {
@@ -351,16 +628,17 @@ function removeDarkModeStyles() {
                       element.removeAttribute('style');
                   }
                   // Clean up WeakMap entry
-                  elementOriginalStyles.delete(element);
+                  elementOriginalStyles.delete(element as HTMLElement);
               } else {
                   // Fallback if we somehow don't have the original style
                   // (shouldn't happen, but just in case)
                   element.removeAttribute('style');
                   
                   // Alternative fallback: remove individual properties
-                  // element.style.removeProperty('background-color');
-                  // element.style.removeProperty('color');
-                  // Removed border-color property cleanup
+                  element.style.removeProperty('background-color');
+                  element.style.removeProperty('color');
+                  element.style.removeProperty('fill');
+                  element.style.removeProperty('stroke');
                   
                   if (isDev) console.warn('[EyeLove CS] Missing original style for element:', element);
               }
@@ -406,7 +684,7 @@ function applyStylesToElementAndChildren(element: Element) {
   const t0 = performance.now();
   
   // Target this element and all its descendants matching our selector
-  const elementSelector = 'body, div, section, article, main, header, footer, nav, aside, p, li, h1, h2, h3, h4, h5, h6, span, button, label, legend, td, th';
+  const elementSelector = 'body, div, section, article, main, header, footer, nav, aside, p, li, h1, h2, h3, h4, h5, h6, span, button, label, legend, td, th, svg';
   const elementsToProcess: Element[] = [];
   
   // Add the element itself if it matches our target tags
@@ -428,6 +706,8 @@ function applyStylesToElementAndChildren(element: Element) {
     element: Element;
     originalBg: string;
     originalColor: string;
+    originalFill?: string;
+    originalStroke?: string;
   }> = [];
   
   // Batch DOM reads
@@ -437,7 +717,9 @@ function applyStylesToElementAndChildren(element: Element) {
       elementsData.push({
         element: el,
         originalBg: styles.backgroundColor,
-        originalColor: styles.color
+        originalColor: styles.color,
+        originalFill: styles.fill !== 'none' ? styles.fill : undefined,
+        originalStroke: styles.stroke !== 'none' ? styles.stroke : undefined
       });
     } catch (e) {
       if (isDev) console.warn('[EyeLove CS] Error reading styles from dynamic element:', el, e);
@@ -450,23 +732,57 @@ function applyStylesToElementAndChildren(element: Element) {
     try {
       let newBg: string | null = null;
       let newColor: string | null = null;
+      let newFill: string | null = null;
+      let newStroke: string | null = null;
       let finalBackgroundL = 0.2; // Default assumed dark background lightness
+      let backgroundLuminance: number | undefined;
       
       // Process Background Color
       const parsedBg = data.originalBg ? culori.parse(data.originalBg) : undefined;
-      if (parsedBg && (parsedBg.alpha ?? 1) > 0.1) {
+      // --- Refined Check: Only process opaque backgrounds ---
+      if (parsedBg && (parsedBg.alpha ?? 1.0) > 0.5) { // Check if alpha is > 0.5 (adjust threshold as needed)
         const oklchBg = culori.oklch(parsedBg);
+        // Only darken if it was originally light enough
         if (oklchBg && oklchBg.l > 0.3) {
           let newL = 1.0 - oklchBg.l;
           let newC = oklchBg.c * 0.3;
           const newH = oklchBg.h || 0;
           newL = Math.max(0, Math.min(1, newL)); 
           newC = Math.max(0, newC);
-          finalBackgroundL = newL;
-          newBg = culori.formatHex({ mode: 'oklch', l: newL, c: newC, h: newH });
+          finalBackgroundL = newL; // Still store lightness for text contrast check
+          
+          const darkOklchBg: Oklch = { 
+            mode: "oklch", 
+            l: newL, 
+            c: newC, 
+            h: newH 
+          };
+          
+          // Calculate background luminance for contrast checks
+          backgroundLuminance = getRelativeLuminance(darkOklchBg);
+          
+          // Generate the hex color
+          newBg = culori.formatHex(darkOklchBg);
         } else if (oklchBg) {
+          // Original was dark or near-dark, store its lightness/luminance for text contrast check
           finalBackgroundL = oklchBg.l;
+          backgroundLuminance = getRelativeLuminance(oklchBg);
+          // Do NOT set newBg - let it keep its original dark color
         }
+      } else {
+        // Background was transparent, semi-transparent, or unparseable
+        // Do NOT set newBg. Assume it should inherit or remain transparent.
+        // Estimate background luminance as dark for text contrast checks if needed.
+        finalBackgroundL = 0.2; // Default dark assumption
+        backgroundLuminance = getRelativeLuminance({ mode: 'oklch', l: finalBackgroundL, c: 0, h: 0 }); // Approx luminance
+        if (isDev && parsedBg) console.debug('[EyeLove CS] Skipping background override for (semi-)transparent element:', data.element, `alpha: ${parsedBg.alpha}`);
+      }
+      // --- End Refined Check ---
+      
+      // Fallback for background luminance if still undefined
+      if (backgroundLuminance === undefined) {
+        // Estimate based on lightness
+        backgroundLuminance = finalBackgroundL < 0.5 ? 0.1 : 0.9;
       }
       
       // Process Text Color with contrast awareness
@@ -493,23 +809,116 @@ function applyStylesToElementAndChildren(element: Element) {
         }
       }
       
+      // Process SVG Fill Color 
+      if (data.originalFill) {
+        try {
+          const parsedFill = culori.parse(data.originalFill);
+          if (parsedFill && (parsedFill.alpha ?? 1) > 0.1) {
+            const oklchFill = culori.oklch(parsedFill);
+            if (oklchFill) {
+              // Simple transformation (similar to text color but without contrast check)
+              let newL = 1.0 - oklchFill.l; // Invert lightness
+              let newC = oklchFill.c * 0.3; // Reduce chroma
+              const newH = oklchFill.h || 0;
+              
+              // Basic clamping
+              newL = Math.max(0, Math.min(1, newL));
+              newC = Math.max(0, newC);
+              
+              // Apply similar contrast logic to fills (lighter for dark backgrounds, darker for light)
+              if (finalBackgroundL < 0.5) {
+                newL = Math.max(newL, 0.6); // Lighter fill on dark background
+              } else {
+                newL = Math.min(newL, 0.3); // Darker fill on light background
+              }
+              
+              const darkOklchFill: Oklch = { 
+                mode: "oklch", 
+                l: newL, 
+                c: newC, 
+                h: newH 
+              };
+              
+              newFill = culori.formatHex(darkOklchFill);
+            }
+          }
+        } catch (e) {
+          if (isDev) console.debug(`[EyeLove CS] Error processing fill color: ${data.originalFill}`, e);
+        }
+      }
+      
+      // Process SVG Stroke Color
+      if (data.originalStroke) {
+        try {
+          const parsedStroke = culori.parse(data.originalStroke);
+          if (parsedStroke && (parsedStroke.alpha ?? 1) > 0.1) {
+            const oklchStroke = culori.oklch(parsedStroke);
+            if (oklchStroke) {
+              // Simple transformation
+              let newL = 1.0 - oklchStroke.l; // Invert lightness
+              let newC = oklchStroke.c * 0.2; // Reduce chroma more for strokes
+              const newH = oklchStroke.h || 0;
+              
+              // Basic clamping
+              newL = Math.max(0, Math.min(1, newL));
+              newC = Math.max(0, newC);
+              
+              // Make strokes more visible
+              if (finalBackgroundL < 0.5) {
+                newL = Math.max(newL, 0.65); // Lighter stroke on dark background
+              } else {
+                newL = Math.min(newL, 0.25); // Darker stroke on light background
+              }
+              
+              const darkOklchStroke: Oklch = { 
+                mode: "oklch", 
+                l: newL, 
+                c: newC, 
+                h: newH 
+              };
+              
+              newStroke = culori.formatHex(darkOklchStroke);
+            }
+          }
+        } catch (e) {
+          if (isDev) console.debug(`[EyeLove CS] Error processing stroke color: ${data.originalStroke}`, e);
+        }
+      }
+      
       // Apply styles
       let stylesApplied = false;
       
-      if (data.element instanceof HTMLElement) {
+      if (data.element instanceof HTMLElement || data.element instanceof SVGElement) {
         // Store original style
         if (!data.element.hasAttribute('data-eyelove-styled')) {
           const originalStyle = data.element.getAttribute('style');
-          elementOriginalStyles.set(data.element, originalStyle);
+          elementOriginalStyles.set(data.element as HTMLElement, originalStyle);
         }
         
-        // Apply new styles - no border styling
-        if (newBg) {
+        // Apply new styles
+        // --- Add Size Check for Background ---
+        const isSmallElement = (data.element instanceof HTMLElement) &&
+                              (data.element.offsetHeight < 24 || data.element.offsetWidth < 24); // Example threshold
+
+        if (newBg && !isSmallElement) { // Only apply BG if NOT small
           data.element.style.setProperty('background-color', newBg, 'important');
           stylesApplied = true;
+        } else if (newBg && isSmallElement && isDev) {
+          console.debug('[EyeLove CS] Skipping background override for small element:', data.element);
         }
+        // --- End Size Check ---
+        
         if (newColor) {
           data.element.style.setProperty('color', newColor, 'important');
+          stylesApplied = true;
+        }
+        // Apply SVG-specific styles
+        if (newFill) {
+          data.element.style.setProperty('fill', newFill, 'important');
+          stylesApplied = true;
+        }
+        if (newStroke) {
+          data.element.style.setProperty('stroke', newStroke, 'important');
           stylesApplied = true;
         }
         
@@ -608,4 +1017,11 @@ function queryInitialState() {
 
 // Query background for potentially updated state ONCE after a short delay.
 // queryInitialState itself handles applying styles based on response or cache fallback.
-setTimeout(queryInitialState, 100); 
+setTimeout(queryInitialState, 100);
+
+// Note: The following unused functions have been removed:
+// - getHighContrastColor
+// - adjustColorForHighContrast
+// - invertLightness
+// - processColorMatches (commented placeholder)
+// - processColorMatches (commented placeholder) 
