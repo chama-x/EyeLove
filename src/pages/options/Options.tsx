@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { SettingsSchema, Settings } from '~/lib/schemas';
+import { SettingsSchema, Settings } from '~/lib/schemas.ts';
 
 function Options() {
   const [settings, setSettings] = useState<Partial<Settings>>({

@@ -1,0 +1,32 @@
+/* src/styles/main.css */
+
+/* Basic Dark Mode MVP Styles */
+
+/* Apply base dark theme when the FOUC class is active */
+html.eyelove-dark-theme-active,
+/* Apply base dark theme when the main toggle class is active */
+body.eyelove-dark-mode-enabled {
+  background-color: #1a1a1a; /* Dark background */
+  color: #e0e0e0; /* Light text */
+  color-scheme: dark; /* Hint browser UI elements */
+}
+
+/* Example: Make links more visible in dark mode */
+body.eyelove-dark-mode-enabled a {
+  color: #9ecaed; /* Light blue for links */
+}
+
+/* Example: Basic button styling adjustment */
+body.eyelove-dark-mode-enabled button {
+  background-color: #444;
+  color: #eee;
+  border-color: #666;
+}
+
+body.eyelove-dark-mode-enabled button:hover {
+  background-color: #555;
+}
+
+/* Add more basic overrides for common elements as needed */
+/* Remember: These are simple global styles for the MVP. */
+/* More sophisticated styling will replace this later. */ 

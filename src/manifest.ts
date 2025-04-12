@@ -38,6 +38,7 @@ export function getManifest(): ManifestV3 {
       },
       {
         js: ['src/content-scripts/main.ts'],
+        css: ['src/styles/main.css'],
         matches: ['<all_urls>'],
         run_at: 'document_idle',
         all_frames: true,

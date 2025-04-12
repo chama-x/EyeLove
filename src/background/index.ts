@@ -1,4 +1,4 @@
-import { SettingsSchema, Settings, parseMessage } from '~/lib/schemas'; // Import Zod schemas/types
+import { SettingsSchema, Settings, parseMessage } from '~/lib/schemas.ts'; // Import Zod schemas/types
 
 console.info('EyeLove Background Service Worker Initialized');
 
@@ -20,12 +20,14 @@ async function sendMessageToActiveTab(message: any) {
   if (tabs[0]?.id) {
     try {
         console.info(`Background sending message to tab ${tabs[0].id}:`, message);
+        console.log(`[EyeLove BG] sendMessageToActiveTab: Attempting to send message to tab ${tabs[0].id}:`, message);
         // Important: Check if the tab is ready before sending complex messages
         // For simple toggles, it might be okay, but consider tab status for heavier actions.
         await chrome.tabs.sendMessage(tabs[0].id, message);
+        console.log(`[EyeLove BG] sendMessageToActiveTab: Message sent successfully to tab ${tabs[0].id}`);
     } catch (error) {
         // Often happens if the content script isn't injected or ready on that specific page (e.g., chrome:// pages)
-        console.warn(`Could not send message to active tab ${tabs[0].id}:`, error instanceof Error ? error.message : error );
+        console.warn(`Could not send message to active tab ${tabs[0].id}:`, error instanceof Error ? error.message : error);
     }
   } else {
       console.warn("Could not find active tab to send message.");
@@ -47,6 +49,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
 
 // On Message: Handle communication from popup, content scripts etc.
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  console.log('[EyeLove BG] Raw message received:', message);
   const parsedMessage = parseMessage(message); // Validate message format
 
   if (!parsedMessage) {
@@ -76,8 +79,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             const newState = !(currentSettings.enabled ?? true); // Toggle current state or default to enabling if undefined
             await chrome.storage.sync.set({ enabled: newState });
             console.info(`Background toggled 'enabled' state to: ${newState}`);
+            console.log(`[EyeLove BG] toggleEnabled: State changed to ${newState}. Attempting to send 'updateBodyClass' to active tab.`);
             // Broadcast change to active tab immediately (storage listener will also fire)
-            await sendMessageToActiveTab({ action: 'updateBodyClass', enabled: newState });
+            await sendMessageToActiveTab({ action: 'updateBodyClass', payload: { enabled: newState } });
             sendResponse({ success: true, newState }); // Acknowledge toggle
         } catch (error) {
              console.error("Error handling toggleEnabled:", error);
@@ -110,7 +114,7 @@ chrome.storage.onChanged.addListener(async (changes, areaName) => {
         const settings = await getSettings(); // Get the complete current state
         // Only broadcast if relevant settings changed
         if (changes.enabled !== undefined || changes.theme !== undefined) {
-             await sendMessageToActiveTab({ action: 'updateBodyClass', enabled: settings.enabled });
+             await sendMessageToActiveTab({ action: 'updateBodyClass', payload: { enabled: settings.enabled } });
              // Later, add theme update logic here too
         }
     }

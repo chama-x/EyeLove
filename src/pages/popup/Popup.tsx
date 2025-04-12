@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { SettingsSchema, Settings } from '~/lib/schemas'; // Import Zod schema/type
+import { SettingsSchema, Settings } from '~/lib/schemas.ts'; // Import Zod schema/type
 
 const POPUP_STATE_CLASS = 'eyelove-popup-state'; // Class to potentially signal state to content script (optional)
 
@@ -67,13 +67,16 @@ function Popup() {
     // Optimistically update UI? Or wait for storage change? Let's wait.
     // Send message to background to toggle the enabled state
     if (chrome.runtime?.id) {
+      console.log('[EyeLove Popup] handleToggle: Sending message:', { action: 'toggleEnabled' });
       console.info("Popup sending 'toggleEnabled' message...");
       chrome.runtime.sendMessage({ action: 'toggleEnabled' }, (response) => {
          if (chrome.runtime.lastError) {
-           console.error('Error sending toggle message:', chrome.runtime.lastError.message);
+           console.error('[EyeLove Popup] handleToggle: Error sending message:', chrome.runtime.lastError.message);
            setError('Failed to toggle.');
-           // Optionally revert optimistic UI update here
          } else {
+           console.log('[EyeLove Popup] handleToggle: Message sent successfully, response:', response);
+           // Clear error on success
+           setError(null);
            console.info("Toggle message acknowledged by background.", response);
            // State will update via the storage listener
          }
