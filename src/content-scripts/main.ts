@@ -2,6 +2,11 @@
 // Injected at document_idle (or later)
 
 import { SettingsSchema, parseMessage } from '~/lib/schemas.ts';
+import * as culori from 'culori'; // Import the culori library
+type Oklch = { mode: "oklch"; l: number; c: number; h: number; alpha?: number };
+
+// Store original element inline styles for proper restoration
+const elementOriginalStyles = new WeakMap<HTMLElement, string | null>();
 
 const BODY_CLASS_DARK_ENABLED = 'eyelove-dark-mode-enabled';
 const isDev = process.env.NODE_ENV === 'development';
@@ -27,111 +32,8 @@ const TARGET_CSS_VARIABLES: string[] = [
   '--md-sys-color-surface', '--md-sys-color-on-surface',
 ];
 
-// == Types ==
-interface HSLColor {
-  h: number; // 0-360
-  s: number; // 0-1
-  l: number; // 0-1
-}
+// == Dynamic Stylesheet Logic ==
 
-// == Color Utility Functions ==
-
-/** Parses hex color (#rgb or #rrggbb) to RGB */
-function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
-  const shorthandRegex = /^#?([a-f\d])([a-f\d])([a-f\d])$/i;
-  hex = hex.replace(shorthandRegex, (m, r, g, b) => r + r + g + g + b + b);
-  const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
-  return result
-    ? {
-        r: parseInt(result[1], 16),
-        g: parseInt(result[2], 16),
-        b: parseInt(result[3], 16),
-      }
-    : null;
-}
-
-/** Converts RGB color values to HSL */
-function rgbToHsl(r: number, g: number, b: number): HSLColor {
-  r /= 255; g /= 255; b /= 255;
-  const max = Math.max(r, g, b), min = Math.min(r, g, b);
-  let h = 0, s = 0, l = (max + min) / 2;
-
-  if (max === min) {
-    h = s = 0; // achromatic
-  } else {
-    const d = max - min;
-    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
-    switch (max) {
-      case r: h = (g - b) / d + (g < b ? 6 : 0); break;
-      case g: h = (b - r) / d + 2; break;
-      case b: h = (r - g) / d + 4; break;
-    }
-    h /= 6;
-  }
-  return { h: h * 360, s: s, l: l };
-}
-
-/** Parses common CSS color strings (hex, rgb) into an HSL object */
-function parseColorString(colorStr: string): HSLColor | null {
-  colorStr = colorStr.trim().toLowerCase();
-  // Try hex
-  const hexRgb = hexToRgb(colorStr);
-  if (hexRgb) {
-    return rgbToHsl(hexRgb.r, hexRgb.g, hexRgb.b);
-  }
-  // Try rgb/rgba
-  const rgbMatch = colorStr.match(/^rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*[\d.]+)?\)$/);
-  if (rgbMatch) {
-    const r = parseInt(rgbMatch[1], 10);
-    const g = parseInt(rgbMatch[2], 10);
-    const b = parseInt(rgbMatch[3], 10);
-    if (!isNaN(r) && !isNaN(g) && !isNaN(b)) {
-      return rgbToHsl(r, g, b);
-    }
-  }
-  // TODO: Add hsl/hsla parsing if needed
-  return null; // Could not parse or unsupported format
-}
-
-/** Transforms an HSL color for dark mode */
-function transformHslForDarkMode(hsl: HSLColor): HSLColor {
-  const { h, s, l } = hsl;
-  let newL = l;
-  let newS = s;
-
-  // Invert lightness significantly (adjust threshold and range as needed)
-  // This pushes light colors towards dark, and dark towards light
-  // We aim for dark backgrounds (low L) and light text (high L)
-  const lightnessThreshold = 0.5; // Cutoff point
-  const targetDarkMaxL = 0.25; // Max lightness for dark backgrounds
-  const targetLightMinL = 0.75; // Min lightness for light text
-
-  if (l >= lightnessThreshold) { // Light color -> make dark
-      newL = targetDarkMaxL * (1 - (l - lightnessThreshold) / (1 - lightnessThreshold));
-  } else { // Dark color -> make light
-      newL = targetLightMinL + (1 - targetLightMinL) * (l / lightnessThreshold);
-  }
-
-  // Reduce saturation, especially for lighter colors
-  newS = s * (0.4 + (1 - l) * 0.4); // Reduce more for lighter colors
-
-  // Clamp values
-  newL = Math.max(0, Math.min(1, newL));
-  newS = Math.max(0, Math.min(1, newS));
-
-  return { h: h, s: newS, l: newL };
-}
-
-/** Converts an HSL object to a CSS hsl() string */
-function hslToCssString(hsl: HSLColor): string {
-  // Round values for CSS
-  const h = Math.round(hsl.h);
-  const s = Math.round(hsl.s * 100);
-  const l = Math.round(hsl.l * 100);
-  return `hsl(${h}, ${s}%, ${l}%)`;
-}
-
-// Create a single stylesheet instance for our dynamic overrides
 let dynamicStyleSheet: CSSStyleSheet | null = null;
 try {
   dynamicStyleSheet = new CSSStyleSheet();
@@ -148,48 +50,209 @@ function applyDarkModeStyles() {
 
   document.body.classList.add(BODY_CLASS_DARK_ENABLED);
 
-  // --- CSS Variable Override Logic ---
-  const computedStyles = getComputedStyle(document.documentElement);
+  // --- CSS Variable Override Logic using OKLCH ---
+  const computedStylesRoot = getComputedStyle(document.documentElement); // Renamed for clarity
   const overrideRules: string[] = [];
 
   for (const varName of TARGET_CSS_VARIABLES) {
-    const value = computedStyles.getPropertyValue(varName).trim();
+    const value = computedStylesRoot.getPropertyValue(varName).trim();
     if (value) {
-      const originalHsl = parseColorString(value); // Parse the original color
-      if (originalHsl) {
-        // If it's a parseable color, transform it
-        const darkHsl = transformHslForDarkMode(originalHsl);
-        const newCssColor = hslToCssString(darkHsl);
-        // Use !important for reliability
-        overrideRules.push(`${varName}: ${newCssColor} !important;`);
+      try {
+        const parsed = culori.parse(value); // Attempt to parse ANY valid CSS color
+        if (parsed) {
+          const originalOklch = culori.oklch(parsed); // Convert to OKLCH
+
+          if (originalOklch) {
+            // Transform OKLCH for dark mode
+            // L: Invert lightness (0 -> 1, 1 -> 0) - simple inversion for now
+            let newL = 1.0 - originalOklch.l;
+            // C: Reduce chroma (saturation) significantly
+            let newC = originalOklch.c * 0.3; // Reduce to 30% (adjust as needed)
+            // H: Keep Hue the same
+            const newH = originalOklch.h || 0; // Use 0 if hue is undefined (e.g., for grayscale)
+
+            // --- Refinements (Could be added later) ---
+            // Clamping: Ensure L is [0, 1], C >= 0
+            newL = Math.max(0, Math.min(1, newL));
+            newC = Math.max(0, newC);
+            // Add minimum contrast logic here if needed based on originalL vs newL
+
+            // Create the new color object with explicit type and mode as literal "oklch"
+            const darkOklch: Oklch = { 
+              mode: "oklch", 
+              l: newL, 
+              c: newC, 
+              h: newH 
+            };
+
+            // Format back to a common, compatible format like HEX
+            const newCssColor = culori.formatHex(darkOklch);
+
+            if (newCssColor) {
+              // Use !important for reliability
+              overrideRules.push(`${varName}: ${newCssColor} !important;`);
+            }
+          }
+        }
+      } catch (parseError) {
+        // culori.parse throws on invalid color string
+        if (isDev) console.debug(`[EyeLove CS] Could not parse color for var ${varName}:`, value, parseError);
       }
-      // If value exists but is not a parseable color (e.g., gradient, keyword),
-      // we currently do nothing. Strategy 2 (computed style analysis) would handle this.
     }
   }
+  // --- End of CSS Variable Strategy (Strategy 1) ---
+
+  // --- Computed Style Analysis Fallback (Strategy 2) ---
+  if (isDev) console.log('[EyeLove CS] Starting Strategy 2: Computed Style Analysis...');
+  const t0_strategy2 = performance.now(); // Start timing Strategy 2
+
+  // TODO: Refine selector later (performance) - avoid '*' initially
+  const elementSelector = 'body, div, section, article, main, header, footer, nav, aside, p, li, h1, h2, h3, h4, h5, h6, span, button, label, legend, td, th'; // Common elements
+  const elementsToCheck = document.querySelectorAll(elementSelector);
+  const elementsToStyleData: Array<{
+      element: Element;
+      originalBg: string;
+      originalColor: string;
+      originalBorder: string;
+  }> = [];
+
+  // == Read Phase (Batch DOM Reads) ==
+  // PERF_NOTE: Avoid reading and writing in the same loop!
+  elementsToCheck.forEach(element => {
+      try {
+          // PERF_NOTE: getComputedStyle can be expensive. Minimize calls.
+          const styles = window.getComputedStyle(element);
+          const bgColor = styles.backgroundColor;
+          const color = styles.color;
+          const borderColor = styles.borderTopColor; // Check one border color for simplicity
+
+          // TODO: Add smarter check: Only process if element needs styling
+          // (e.g., light background OR dark text, AND not transparent/fully transparent,
+          // AND maybe check if it's already inheriting styles correctly from overridden vars)
+          // For now, store all found colors for processing.
+
+          elementsToStyleData.push({
+              element: element,
+              originalBg: bgColor,
+              originalColor: color,
+              originalBorder: borderColor
+          });
+      } catch (e) {
+          if (isDev) console.warn('[EyeLove CS] Error getting computed style for element:', element, e);
+      }
+  });
+  if (isDev) console.log(`[EyeLove CS] Strategy 2: Read phase found ${elementsToStyleData.length} elements data points.`);
+
+
+  // == Write Phase (Batch DOM Writes - Apply Inline Styles) ==
+  // PERF_NOTE: This loop applies inline styles. Consider generating CSS rules for adopted sheet later if needed.
+  elementsToStyleData.forEach(data => {
+      try {
+          let newBg: string | null = null;
+          let newColor: string | null = null;
+          let newBorder: string | null = null;
+
+          // Process Background Color
+          const parsedBg = data.originalBg ? culori.parse(data.originalBg) : undefined;
+          if (parsedBg && (parsedBg.alpha ?? 1) > 0.1) { // Ignore transparent/mostly transparent
+             const oklchBg = culori.oklch(parsedBg);
+             if (oklchBg && oklchBg.l > 0.3) { // Only darken sufficiently light backgrounds
+                 let newL = 1.0 - oklchBg.l;
+                 let newC = oklchBg.c * 0.3;
+                 const newH = oklchBg.h || 0;
+                 newL = Math.max(0, Math.min(1, newL)); newC = Math.max(0, newC);
+                 newBg = culori.formatHex({ mode: 'oklch', l: newL, c: newC, h: newH });
+             }
+          }
+
+          // Process Text Color
+          const parsedColor = data.originalColor ? culori.parse(data.originalColor) : undefined;
+           if (parsedColor && (parsedColor.alpha ?? 1) > 0.5) { // Ignore transparent text
+             const oklchColor = culori.oklch(parsedColor);
+             if (oklchColor && oklchColor.l < 0.7) { // Only lighten sufficiently dark text
+                 let newL = 1.0 - oklchColor.l;
+                 let newC = oklchColor.c * 0.3;
+                 const newH = oklchColor.h || 0;
+                 newL = Math.max(0, Math.min(1, newL)); newC = Math.max(0, newC);
+                 // Ensure minimum lightness for text contrast
+                 newL = Math.max(newL, 0.8); // Ensure text is at least 80% light
+                 newColor = culori.formatHex({ mode: 'oklch', l: newL, c: newC, h: newH });
+             }
+          }
+
+           // Process Border Color (simplified)
+          const parsedBorder = data.originalBorder ? culori.parse(data.originalBorder) : undefined;
+           if (parsedBorder && (parsedBorder.alpha ?? 1) > 0.1) {
+             const oklchBorder = culori.oklch(parsedBorder);
+             if (oklchBorder) { // Transform all borders for now
+                 let newL = 1.0 - oklchBorder.l;
+                 let newC = oklchBorder.c * 0.1; // Desaturate borders heavily
+                 const newH = oklchBorder.h || 0;
+                 newL = Math.max(0, Math.min(1, newL)); newC = Math.max(0, newC);
+                 newBorder = culori.formatHex({ mode: 'oklch', l: newL, c: newC, h: newH });
+             }
+          }
+
+          // Apply styles directly to the element using setProperty
+          // PERF_NOTE: Writing inline styles. Causes DOM modification.
+          let stylesApplied = false;
+          
+          if (data.element instanceof HTMLElement) {
+              // First, store the original style but only if not already styled by us
+              if (!data.element.hasAttribute('data-eyelove-styled')) {
+                  const originalStyle = data.element.getAttribute('style');
+                  elementOriginalStyles.set(data.element, originalStyle);
+              }
+              
+              // Apply new styles
+              if (newBg) {
+                  data.element.style.setProperty('background-color', newBg, 'important');
+                  stylesApplied = true;
+              }
+              if (newColor) {
+                  data.element.style.setProperty('color', newColor, 'important');
+                  stylesApplied = true;
+              }
+              if (newBorder) {
+                  // Applying to all border sides for simplicity
+                  data.element.style.setProperty('border-color', newBorder, 'important');
+                  stylesApplied = true;
+              }
+              
+              // Mark the element as styled by EyeLove for later cleanup
+              if (stylesApplied) {
+                  data.element.dataset.eyeloveStyled = 'inline';
+              }
+          }
+      } catch (e) {
+          if (isDev) console.warn('[EyeLove CS] Error processing or styling element:', data.element, e);
+      }
+  });
+
+  const t1_strategy2 = performance.now();
+  if (isDev) console.log(`[EyeLove CS] Strategy 2: Write phase finished. Duration: ${(t1_strategy2 - t0_strategy2).toFixed(2)}ms`);
+  // --- End of Strategy 2 ---
 
   // Combine generated rules with fallback styles
   const cssOverrideRules = `
-    /* EyeLove Dynamic Styles */
+    /* EyeLove Dynamic Styles (OKLCH-based) */
     html.eyelove-dark-theme-active,
     body.${BODY_CLASS_DARK_ENABLED} {
-      /* Basic Fallbacks (applied if no variables override them OR if body class is used) */
+      /* Basic Fallbacks */
       background-color: #1a1a1a !important;
       color: #e0e0e0 !important;
-      border-color: #444444 !important; /* Basic border fallback */
+      border-color: #444444 !important;
       color-scheme: dark !important;
 
-      /* Generated Variable Overrides (applied to :root effectively via specificity) */
+      /* Generated Variable Overrides (Strategy 1) */
       ${overrideRules.join('\n      ')}
     }
 
-    /* Specific overrides needed beyond variables (keep simple) */
+    /* Specific non-variable overrides */
     body.${BODY_CLASS_DARK_ENABLED} a {
-        color: #9ecaed !important; /* Ensure links are readable */
+      color: #9ecaed !important;
     }
-     /* Add more targeted overrides if variables aren't enough */
   `;
-  // -------------------------------------------------
 
   try {
     // Update the sheet content
@@ -201,7 +264,8 @@ function applyDarkModeStyles() {
     if (!document.adoptedStyleSheets.includes(dynamicStyleSheet)) {
       document.adoptedStyleSheets = [...document.adoptedStyleSheets, dynamicStyleSheet];
     }
-     if (isDev) console.info('[EyeLove CS] Applied dynamic dark mode styles. Overridden vars:', overrideRules.length, 'CSS:', cssOverrideRules);
+    if (isDev) console.info('[EyeLove CS] Applied dynamic dark mode styles (OKLCH). Overridden vars:', overrideRules.length);
+    // if (isDev && overrideRules.length > 0) console.debug('Generated CSS:', cssOverrideRules); // Optionally log full CSS
 
   } catch (e) {
       console.error('[EyeLove CS] Error applying dynamic styles:', e);
@@ -219,6 +283,46 @@ function applyDarkModeStyles() {
  * Removes dynamic dark mode styles and body class.
  */
 function removeDarkModeStyles() {
+  // First, clean up any inline styles applied by Strategy 2
+  const t0_cleanup = performance.now();
+  const inlineStyledElements = document.querySelectorAll('[data-eyelove-styled="inline"]');
+  
+  if (inlineStyledElements.length > 0) {
+      if (isDev) console.log(`[EyeLove CS] Removing inline styles from ${inlineStyledElements.length} elements`);
+      
+      inlineStyledElements.forEach(element => {
+          if (element instanceof HTMLElement) {
+              // Retrieve original style
+              const originalStyle = elementOriginalStyles.get(element);
+              
+              // Restore original style state
+              if (originalStyle !== undefined) {
+                  if (originalStyle !== null) {
+                      // Element had a style attribute before - restore it
+                      element.setAttribute('style', originalStyle);
+                  } else {
+                      // Element had no style attribute before - remove it completely
+                      element.removeAttribute('style');
+                  }
+                  // Clean up WeakMap entry
+                  elementOriginalStyles.delete(element);
+              } else {
+                  // Fallback if we somehow don't have the original style
+                  // (shouldn't happen, but just in case)
+                  element.removeAttribute('style');
+                  if (isDev) console.warn('[EyeLove CS] Missing original style for element:', element);
+              }
+              
+              // Remove our marker
+              element.removeAttribute('data-eyelove-styled');
+          }
+      });
+      
+      const t1_cleanup = performance.now();
+      if (isDev) console.log(`[EyeLove CS] Inline styles cleanup completed in ${(t1_cleanup - t0_cleanup).toFixed(2)}ms`);
+  }
+  
+  // Then remove the body class
   document.body.classList.remove(BODY_CLASS_DARK_ENABLED);
 
   // Remove our specific sheet from the document
@@ -318,15 +422,6 @@ function queryInitialState() {
   }
 }
 
-// Initial load - Apply styles immediately based on cache if possible before querying background
-try {
-    const cachedEnabled = localStorage.getItem('eyelove-enabled-cache') === 'true';
-    if(cachedEnabled) {
-        if (isDev) console.info('[EyeLove CS] Applying initial styles from cache.');
-        applyDarkModeStyles(); // Apply styles immediately based on cache
-    }
-} catch(e) {
-     if (isDev) console.error('Error reading cache on initial load:', e);
-}
-// Then query background for potentially updated state
+// Query background for potentially updated state ONCE after a short delay.
+// queryInitialState itself handles applying styles based on response or cache fallback.
 setTimeout(queryInitialState, 100); 
