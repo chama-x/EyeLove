@@ -8,6 +8,9 @@ type Oklch = { mode: "oklch"; l: number; c: number; h: number; alpha?: number };
 // Store original element inline styles for proper restoration
 const elementOriginalStyles = new WeakMap<HTMLElement, string | null>();
 
+// Observer for dynamic content
+let domObserver: MutationObserver | null = null;
+
 const BODY_CLASS_DARK_ENABLED = 'eyelove-dark-mode-enabled';
 const isDev = process.env.NODE_ENV === 'development';
 
@@ -150,7 +153,7 @@ function applyDarkModeStyles() {
       try {
           let newBg: string | null = null;
           let newColor: string | null = null;
-          let newBorder: string | null = null;
+          let finalBackgroundL = 0.2; // Default assumed dark background lightness
 
           // Process Background Color
           const parsedBg = data.originalBg ? culori.parse(data.originalBg) : undefined;
@@ -161,37 +164,48 @@ function applyDarkModeStyles() {
                  let newC = oklchBg.c * 0.3;
                  const newH = oklchBg.h || 0;
                  newL = Math.max(0, Math.min(1, newL)); newC = Math.max(0, newC);
+                 // Store the final background lightness
+                 finalBackgroundL = newL;
                  newBg = culori.formatHex({ mode: 'oklch', l: newL, c: newC, h: newH });
+             } else if (oklchBg) {
+                 // Background was already dark or near-dark, use its original lightness
+                 finalBackgroundL = oklchBg.l;
              }
           }
 
           // Process Text Color
           const parsedColor = data.originalColor ? culori.parse(data.originalColor) : undefined;
-           if (parsedColor && (parsedColor.alpha ?? 1) > 0.5) { // Ignore transparent text
+          if (parsedColor && (parsedColor.alpha ?? 1) > 0.5) { // Ignore transparent text
              const oklchColor = culori.oklch(parsedColor);
-             if (oklchColor && oklchColor.l < 0.7) { // Only lighten sufficiently dark text
+             if (oklchColor) { // Process text color if parseable
+                 // Initial transformation
                  let newL = 1.0 - oklchColor.l;
-                 let newC = oklchColor.c * 0.3;
+                 let newC = oklchColor.c * 0.3; // Reduce chroma similarly
                  const newH = oklchColor.h || 0;
-                 newL = Math.max(0, Math.min(1, newL)); newC = Math.max(0, newC);
-                 // Ensure minimum lightness for text contrast
-                 newL = Math.max(newL, 0.8); // Ensure text is at least 80% light
-                 newColor = culori.formatHex({ mode: 'oklch', l: newL, c: newC, h: newH });
+
+                 // Clamp initial values
+                 newL = Math.max(0, Math.min(1, newL));
+                 newC = Math.max(0, newC);
+
+                 // --- Contrast Adjustment based on Background Lightness ---
+                 if (finalBackgroundL < 0.5) {
+                     // Background is dark, ensure text is light
+                     newL = Math.max(newL, 0.75); // Force lightness >= 0.75
+                 } else {
+                     // Background is light, ensure text is dark
+                     newL = Math.min(newL, 0.25); // Force lightness <= 0.25
+                 }
+                 // Re-clamp after adjustment (though likely redundant if logic is correct)
+                 newL = Math.max(0, Math.min(1, newL));
+                 // --- End Contrast Adjustment ---
+
+                 // Create final text color object
+                 const darkOklchText: Oklch = { mode: "oklch", l: newL, c: newC, h: newH };
+                 newColor = culori.formatHex(darkOklchText);
              }
           }
 
-           // Process Border Color (simplified)
-          const parsedBorder = data.originalBorder ? culori.parse(data.originalBorder) : undefined;
-           if (parsedBorder && (parsedBorder.alpha ?? 1) > 0.1) {
-             const oklchBorder = culori.oklch(parsedBorder);
-             if (oklchBorder) { // Transform all borders for now
-                 let newL = 1.0 - oklchBorder.l;
-                 let newC = oklchBorder.c * 0.1; // Desaturate borders heavily
-                 const newH = oklchBorder.h || 0;
-                 newL = Math.max(0, Math.min(1, newL)); newC = Math.max(0, newC);
-                 newBorder = culori.formatHex({ mode: 'oklch', l: newL, c: newC, h: newH });
-             }
-          }
+          // Removed Border Color Processing - to prevent issues with rounded corners
 
           // Apply styles directly to the element using setProperty
           // PERF_NOTE: Writing inline styles. Causes DOM modification.
@@ -213,11 +227,7 @@ function applyDarkModeStyles() {
                   data.element.style.setProperty('color', newColor, 'important');
                   stylesApplied = true;
               }
-              if (newBorder) {
-                  // Applying to all border sides for simplicity
-                  data.element.style.setProperty('border-color', newBorder, 'important');
-                  stylesApplied = true;
-              }
+              // Removed border-color styling
               
               // Mark the element as styled by EyeLove for later cleanup
               if (stylesApplied) {
@@ -277,12 +287,48 @@ function applyDarkModeStyles() {
   } catch (e) {
     if (isDev) console.error('Error writing to localStorage cache:', e);
   }
+  
+  // Set up MutationObserver for dynamic content if not already observing
+  if (!domObserver) {
+    if (isDev) console.log('[EyeLove CS] Setting up MutationObserver for dynamic content');
+    
+    domObserver = new MutationObserver((mutationsList) => {
+      if (isDev) console.log('[EyeLove CS] DOM mutations detected:', mutationsList.length);
+      
+      for (const mutation of mutationsList) {
+        if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
+          mutation.addedNodes.forEach(node => {
+            if (node instanceof HTMLElement) {
+              if (isDev) console.log('[EyeLove CS] New element added to DOM:', node);
+              applyStylesToElementAndChildren(node);
+            }
+          });
+        }
+      }
+    });
+    
+    // Start observing with configuration
+    domObserver.observe(document.body, {
+      childList: true,
+      subtree: true,
+      attributes: false
+    });
+    
+    if (isDev) console.log('[EyeLove CS] MutationObserver started for dynamic content');
+  }
 }
 
 /**
  * Removes dynamic dark mode styles and body class.
  */
 function removeDarkModeStyles() {
+  // Disconnect the mutation observer if it exists
+  if (domObserver) {
+    domObserver.disconnect();
+    domObserver = null;
+    if (isDev) console.log('[EyeLove CS] MutationObserver disconnected');
+  }
+  
   // First, clean up any inline styles applied by Strategy 2
   const t0_cleanup = performance.now();
   const inlineStyledElements = document.querySelectorAll('[data-eyelove-styled="inline"]');
@@ -310,6 +356,12 @@ function removeDarkModeStyles() {
                   // Fallback if we somehow don't have the original style
                   // (shouldn't happen, but just in case)
                   element.removeAttribute('style');
+                  
+                  // Alternative fallback: remove individual properties
+                  // element.style.removeProperty('background-color');
+                  // element.style.removeProperty('color');
+                  // Removed border-color property cleanup
+                  
                   if (isDev) console.warn('[EyeLove CS] Missing original style for element:', element);
               }
               
@@ -343,6 +395,138 @@ function removeDarkModeStyles() {
   }
 }
 
+/**
+ * Apply styles to a dynamically added element and its children
+ * 
+ * @param element The newly added element to style
+ */
+function applyStylesToElementAndChildren(element: Element) {
+  if (!element) return;
+  
+  const t0 = performance.now();
+  
+  // Target this element and all its descendants matching our selector
+  const elementSelector = 'body, div, section, article, main, header, footer, nav, aside, p, li, h1, h2, h3, h4, h5, h6, span, button, label, legend, td, th';
+  const elementsToProcess: Element[] = [];
+  
+  // Add the element itself if it matches our target tags
+  if (element.nodeName && elementSelector.includes(element.nodeName.toLowerCase())) {
+    elementsToProcess.push(element);
+  }
+  
+  // Add matching child elements
+  if (element.querySelectorAll) {
+    const children = element.querySelectorAll(elementSelector);
+    children.forEach(child => elementsToProcess.push(child));
+  }
+  
+  if (elementsToProcess.length === 0) return;
+  if (isDev) console.log(`[EyeLove CS] Processing ${elementsToProcess.length} dynamic elements`);
+  
+  // --- Read Phase ---
+  const elementsData: Array<{
+    element: Element;
+    originalBg: string;
+    originalColor: string;
+  }> = [];
+  
+  // Batch DOM reads
+  elementsToProcess.forEach(el => {
+    try {
+      const styles = window.getComputedStyle(el);
+      elementsData.push({
+        element: el,
+        originalBg: styles.backgroundColor,
+        originalColor: styles.color
+      });
+    } catch (e) {
+      if (isDev) console.warn('[EyeLove CS] Error reading styles from dynamic element:', el, e);
+    }
+  });
+  
+  // --- Write Phase ---
+  // Apply the same strategy 2 logic but without border handling
+  elementsData.forEach(data => {
+    try {
+      let newBg: string | null = null;
+      let newColor: string | null = null;
+      let finalBackgroundL = 0.2; // Default assumed dark background lightness
+      
+      // Process Background Color
+      const parsedBg = data.originalBg ? culori.parse(data.originalBg) : undefined;
+      if (parsedBg && (parsedBg.alpha ?? 1) > 0.1) {
+        const oklchBg = culori.oklch(parsedBg);
+        if (oklchBg && oklchBg.l > 0.3) {
+          let newL = 1.0 - oklchBg.l;
+          let newC = oklchBg.c * 0.3;
+          const newH = oklchBg.h || 0;
+          newL = Math.max(0, Math.min(1, newL)); 
+          newC = Math.max(0, newC);
+          finalBackgroundL = newL;
+          newBg = culori.formatHex({ mode: 'oklch', l: newL, c: newC, h: newH });
+        } else if (oklchBg) {
+          finalBackgroundL = oklchBg.l;
+        }
+      }
+      
+      // Process Text Color with contrast awareness
+      const parsedColor = data.originalColor ? culori.parse(data.originalColor) : undefined;
+      if (parsedColor && (parsedColor.alpha ?? 1) > 0.5) {
+        const oklchColor = culori.oklch(parsedColor);
+        if (oklchColor) {
+          let newL = 1.0 - oklchColor.l;
+          let newC = oklchColor.c * 0.3;
+          const newH = oklchColor.h || 0;
+          
+          newL = Math.max(0, Math.min(1, newL));
+          newC = Math.max(0, newC);
+          
+          // Apply contrast adjustment
+          if (finalBackgroundL < 0.5) {
+            newL = Math.max(newL, 0.75); // Light text on dark background
+          } else {
+            newL = Math.min(newL, 0.25); // Dark text on light background
+          }
+          
+          const darkOklchText: Oklch = { mode: "oklch", l: newL, c: newC, h: newH };
+          newColor = culori.formatHex(darkOklchText);
+        }
+      }
+      
+      // Apply styles
+      let stylesApplied = false;
+      
+      if (data.element instanceof HTMLElement) {
+        // Store original style
+        if (!data.element.hasAttribute('data-eyelove-styled')) {
+          const originalStyle = data.element.getAttribute('style');
+          elementOriginalStyles.set(data.element, originalStyle);
+        }
+        
+        // Apply new styles - no border styling
+        if (newBg) {
+          data.element.style.setProperty('background-color', newBg, 'important');
+          stylesApplied = true;
+        }
+        if (newColor) {
+          data.element.style.setProperty('color', newColor, 'important');
+          stylesApplied = true;
+        }
+        
+        if (stylesApplied) {
+          data.element.dataset.eyeloveStyled = 'inline';
+        }
+      }
+    } catch (e) {
+      if (isDev) console.warn('[EyeLove CS] Error styling dynamic element:', data.element, e);
+    }
+  });
+  
+  const t1 = performance.now();
+  if (isDev && elementsData.length > 0) {
+    console.log(`[EyeLove CS] Processed ${elementsData.length} dynamic elements in ${(t1 - t0).toFixed(2)}ms`);
+  }
+}
 
 // == Listeners ==
 
