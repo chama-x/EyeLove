@@ -293,6 +293,7 @@ function applyDarkModeStyles() {
           let newStroke: string | null = null;
           let finalBackgroundL = 0.2; // Default assumed dark background lightness
           let backgroundLuminance: number | undefined;
+          const isButton = data.element.tagName === 'BUTTON'; // Check if it's a button
 
           // Process Background Color
           const parsedBg = data.originalBg ? culori.parse(data.originalBg) : undefined;
@@ -301,12 +302,24 @@ function applyDarkModeStyles() {
              const oklchBg = culori.oklch(parsedBg);
              // Only darken if it was originally light enough
              if (oklchBg && oklchBg.l > 0.3) {
-                 let newL = 1.0 - oklchBg.l;
-                 let newC = oklchBg.c * 0.3;
+                 let targetL: number;
+                 let targetC = oklchBg.c * 0.3; // Default chroma reduction
+                 
+                 if (isButton) {
+                     // Buttons: Aim for a mid-dark gray, reduce chroma more
+                     targetL = 0.35; // e.g., Target 35% lightness
+                     targetC = oklchBg.c * 0.1;
+                 } else {
+                     // Other elements: Invert lightness
+                     targetL = 1.0 - oklchBg.l;
+                 }
+                 
                  const newH = oklchBg.h || 0;
-                 newL = Math.max(0, Math.min(1, newL)); newC = Math.max(0, newC);
-                 finalBackgroundL = newL; // Still store lightness for text contrast check
-                 const darkOklchBg: Oklch = { mode: "oklch", l: newL, c: newC, h: newH };
+                 targetL = Math.max(0, Math.min(1, targetL));
+                 targetC = Math.max(0, targetC); // Use adjusted targetC for buttons
+
+                 finalBackgroundL = targetL; // Store the final target lightness
+                 const darkOklchBg: Oklch = { mode: "oklch", l: finalBackgroundL, c: targetC, h: newH };
                  backgroundLuminance = getRelativeLuminance(darkOklchBg);
                  newBg = culori.formatHex(darkOklchBg);
              } else if (oklchBg) {
@@ -347,7 +360,7 @@ function applyDarkModeStyles() {
                  
                  // Initial transformation
                  let newL = 1.0 - initialOklchText.l; // Invert lightness
-                 let newC = initialOklchText.c * 0.3; // Reduce chroma 
+                 let newC = initialOklchText.c * (isButton ? 0.5 : 0.3); // Less chroma reduction for button text
                  const newH = initialOklchText.h || 0;
                  
                  // Basic clamping
@@ -399,7 +412,7 @@ function applyDarkModeStyles() {
                       if (oklchFill) {
                           // Simple transformation (similar to text color but without contrast check)
                           let newL = 1.0 - oklchFill.l; // Invert lightness
-                          let newC = oklchFill.c * 0.3; // Reduce chroma
+                          let newC = oklchFill.c * (isButton ? 0.4 : 0.3); // Less chroma reduction for button icons
                           const newH = oklchFill.h || 0;
                           
                           // Basic clamping
@@ -407,10 +420,13 @@ function applyDarkModeStyles() {
                           newC = Math.max(0, newC);
                           
                           // Apply similar contrast logic to fills (lighter for dark backgrounds, darker for light)
+                          // Use a specific target for button icons
+                          const svgContrastTargetL = finalBackgroundL < 0.5 ? 0.70 : 0.30;
+                          
                           if (finalBackgroundL < 0.5) {
-                              newL = Math.max(newL, 0.6); // Lighter fill on dark background
+                              newL = Math.max(newL, svgContrastTargetL); // Lighter fill on dark background
                           } else {
-                              newL = Math.min(newL, 0.3); // Darker fill on light background
+                              newL = Math.min(newL, svgContrastTargetL); // Darker fill on light background
                           }
                           
                           const darkOklchFill: Oklch = { 
@@ -438,7 +454,7 @@ function applyDarkModeStyles() {
                       if (oklchStroke) {
                           // Simple transformation
                           let newL = 1.0 - oklchStroke.l; // Invert lightness
-                          let newC = oklchStroke.c * 0.2; // Reduce chroma more for strokes
+                          let newC = oklchStroke.c * (isButton ? 0.3 : 0.2); // Less chroma reduction for button strokes
                           const newH = oklchStroke.h || 0;
                           
                           // Basic clamping
@@ -446,10 +462,12 @@ function applyDarkModeStyles() {
                           newC = Math.max(0, newC);
                           
                           // Make strokes more visible based on background
+                          const svgContrastTargetL = finalBackgroundL < 0.5 ? 0.70 : 0.30;
+                          
                           if (finalBackgroundL < 0.5) {
-                              newL = Math.max(newL, 0.65); // Lighter stroke on dark background
+                              newL = Math.max(newL, svgContrastTargetL); // Lighter stroke on dark background
                           } else {
-                              newL = Math.min(newL, 0.25); // Darker stroke on light background
+                              newL = Math.min(newL, svgContrastTargetL); // Darker stroke on light background
                           }
                           
                           const darkOklchStroke: Oklch = { 
@@ -736,7 +754,8 @@ function applyStylesToElementAndChildren(element: Element) {
       let newStroke: string | null = null;
       let finalBackgroundL = 0.2; // Default assumed dark background lightness
       let backgroundLuminance: number | undefined;
-      
+      const isButton = data.element.tagName === 'BUTTON'; // Check if it's a button
+
       // Process Background Color
       const parsedBg = data.originalBg ? culori.parse(data.originalBg) : undefined;
       // --- Refined Check: Only process opaque backgrounds ---
@@ -744,17 +763,28 @@ function applyStylesToElementAndChildren(element: Element) {
         const oklchBg = culori.oklch(parsedBg);
         // Only darken if it was originally light enough
         if (oklchBg && oklchBg.l > 0.3) {
-          let newL = 1.0 - oklchBg.l;
-          let newC = oklchBg.c * 0.3;
+          let targetL: number;
+          let targetC = oklchBg.c * 0.3; // Default chroma reduction
+          
+          if (isButton) {
+            // Buttons: Aim for a mid-dark gray, reduce chroma more
+            targetL = 0.35; // e.g., Target 35% lightness
+            targetC = oklchBg.c * 0.1;
+          } else {
+            // Other elements: Invert lightness
+            targetL = 1.0 - oklchBg.l;
+          }
+          
           const newH = oklchBg.h || 0;
-          newL = Math.max(0, Math.min(1, newL)); 
-          newC = Math.max(0, newC);
-          finalBackgroundL = newL; // Still store lightness for text contrast check
+          targetL = Math.max(0, Math.min(1, targetL));
+          targetC = Math.max(0, targetC); // Use adjusted targetC for buttons
+
+          finalBackgroundL = targetL; // Store the final target lightness
           
           const darkOklchBg: Oklch = { 
             mode: "oklch", 
-            l: newL, 
-            c: newC, 
+            l: finalBackgroundL, 
+            c: targetC, 
             h: newH 
           };
           
@@ -791,17 +821,20 @@ function applyStylesToElementAndChildren(element: Element) {
         const oklchColor = culori.oklch(parsedColor);
         if (oklchColor) {
           let newL = 1.0 - oklchColor.l;
-          let newC = oklchColor.c * 0.3;
+          let newC = oklchColor.c * (isButton ? 0.5 : 0.3); // Less chroma reduction for button text
           const newH = oklchColor.h || 0;
           
           newL = Math.max(0, Math.min(1, newL));
           newC = Math.max(0, newC);
           
           // Apply contrast adjustment
+          // For buttons, use specific contrast targets
+          const contrastTarget = finalBackgroundL < 0.5 ? 0.75 : 0.25;
+          
           if (finalBackgroundL < 0.5) {
-            newL = Math.max(newL, 0.75); // Light text on dark background
+            newL = Math.max(newL, contrastTarget); // Light text on dark background
           } else {
-            newL = Math.min(newL, 0.25); // Dark text on light background
+            newL = Math.min(newL, contrastTarget); // Dark text on light background
           }
           
           const darkOklchText: Oklch = { mode: "oklch", l: newL, c: newC, h: newH };
@@ -818,7 +851,7 @@ function applyStylesToElementAndChildren(element: Element) {
             if (oklchFill) {
               // Simple transformation (similar to text color but without contrast check)
               let newL = 1.0 - oklchFill.l; // Invert lightness
-              let newC = oklchFill.c * 0.3; // Reduce chroma
+              let newC = oklchFill.c * (isButton ? 0.4 : 0.3); // Less chroma reduction for button icons
               const newH = oklchFill.h || 0;
               
               // Basic clamping
@@ -826,10 +859,13 @@ function applyStylesToElementAndChildren(element: Element) {
               newC = Math.max(0, newC);
               
               // Apply similar contrast logic to fills (lighter for dark backgrounds, darker for light)
+              // Use a specific target for button icons
+              const svgContrastTargetL = finalBackgroundL < 0.5 ? 0.70 : 0.30;
+              
               if (finalBackgroundL < 0.5) {
-                newL = Math.max(newL, 0.6); // Lighter fill on dark background
+                newL = Math.max(newL, svgContrastTargetL); // Lighter fill on dark background
               } else {
-                newL = Math.min(newL, 0.3); // Darker fill on light background
+                newL = Math.min(newL, svgContrastTargetL); // Darker fill on light background
               }
               
               const darkOklchFill: Oklch = { 
@@ -856,7 +892,7 @@ function applyStylesToElementAndChildren(element: Element) {
             if (oklchStroke) {
               // Simple transformation
               let newL = 1.0 - oklchStroke.l; // Invert lightness
-              let newC = oklchStroke.c * 0.2; // Reduce chroma more for strokes
+              let newC = oklchStroke.c * (isButton ? 0.3 : 0.2); // Less chroma reduction for button strokes
               const newH = oklchStroke.h || 0;
               
               // Basic clamping
@@ -864,10 +900,12 @@ function applyStylesToElementAndChildren(element: Element) {
               newC = Math.max(0, newC);
               
               // Make strokes more visible
+              const svgContrastTargetL = finalBackgroundL < 0.5 ? 0.70 : 0.30;
+              
               if (finalBackgroundL < 0.5) {
-                newL = Math.max(newL, 0.65); // Lighter stroke on dark background
+                newL = Math.max(newL, svgContrastTargetL); // Lighter stroke on dark background
               } else {
-                newL = Math.min(newL, 0.25); // Darker stroke on light background
+                newL = Math.min(newL, svgContrastTargetL); // Darker stroke on light background
               }
               
               const darkOklchStroke: Oklch = { 
