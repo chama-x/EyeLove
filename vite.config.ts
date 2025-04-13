@@ -51,12 +51,7 @@ export default defineConfig({
     outDir: 'dist',
     emptyOutDir: true, // Clean dist folder before build
     rollupOptions: {
-      // Define output structure for assets
-      output: {
-        entryFileNames: 'assets/[name]-[hash].js',
-        chunkFileNames: 'assets/[name]-[hash].js',
-        assetFileNames: 'assets/[name]-[hash].[ext]',
-      },
+      // REMOVED the output: { ... } block from here
     },
   },
 });

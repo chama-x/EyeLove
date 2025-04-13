@@ -29,31 +29,36 @@ const MAX_CONTRAST_ITERATIONS = 10;
 
 // == WCAG Contrast Utility Functions ==
 
+/** Convert gamma-corrected sRGB channel (0-1) to linear */
+function linearize(channel: number): number {
+  if (channel <= 0.04045) {
+    return channel / 12.92;
+  }
+  return Math.pow((channel + 0.055) / 1.055, 2.4);
+}
+
 /**
  * Calculate relative luminance from an OKLCH color object
  * Uses the formula Y = 0.2126*R + 0.7152*G + 0.0722*B
  * 
  * @param oklchColor The OKLCH color object
- * @returns The relative luminance (0-1), or 0 if conversion fails
+ * @returns The relative luminance (0-1), or undefined if conversion fails
  */
-function getRelativeLuminance(oklchColor: Oklch): number {
+function getRelativeLuminance(oklchColor: Oklch | undefined): number | undefined {
+  if (!oklchColor) return undefined;
   try {
-    // Ensure h exists with fallback to 0
-    const color = {
-      ...oklchColor,
-      h: oklchColor.h ?? 0
-    };
-    
-    // Convert OKLCH to RGB
-    const rgb = culori.rgb(color);
-    
-    if (!rgb) return 0;
-    
-    // Calculate relative luminance using the formula from WCAG 2.0
-    return 0.2126 * rgb.r + 0.7152 * rgb.g + 0.0722 * rgb.b;
+    // Ensure h is defined for conversion
+    const colorWithH = { ...oklchColor, h: oklchColor.h ?? 0 };
+    const rgb = culori.rgb(colorWithH); // Convert to sRGB
+    if (!rgb) return undefined;
+    // Convert to linear sRGB and calculate luminance
+    const R = linearize(rgb.r);
+    const G = linearize(rgb.g);
+    const B = linearize(rgb.b);
+    return 0.2126 * R + 0.7152 * G + 0.0722 * B;
   } catch (e) {
-    if (isDev) console.warn('[EyeLove CS] Error calculating luminance:', e);
-    return 0;
+    if (isDev) console.warn('[EyeLove CS] Error calculating luminance for:', oklchColor, e);
+    return undefined;
   }
 }
 
@@ -64,13 +69,11 @@ function getRelativeLuminance(oklchColor: Oklch): number {
  * @param luminance2 Second luminance value (0-1)
  * @returns Contrast ratio (1-21)
  */
-function calculateContrastRatio(luminance1: number, luminance2: number): number {
-  if (luminance1 === undefined || luminance2 === undefined) return 1;
-  
-  const lighterLuminance = Math.max(luminance1, luminance2);
-  const darkerLuminance = Math.min(luminance1, luminance2);
-  
-  return (lighterLuminance + 0.05) / (darkerLuminance + 0.05);
+function calculateContrastRatio(lum1: number | undefined, lum2: number | undefined): number {
+  if (lum1 === undefined || lum2 === undefined) return 1;
+  const lighter = Math.max(lum1, lum2);
+  const darker = Math.min(lum1, lum2);
+  return (lighter + 0.05) / (darker + 0.05);
 }
 
 /**
@@ -82,63 +85,45 @@ function calculateContrastRatio(luminance1: number, luminance2: number): number 
  * @returns Adjusted OKLCH color object with appropriate lightness
  */
 function adjustTextLightnessForContrast(
-  textColorOklch: Oklch, 
-  backgroundLuminance: number, 
+  textColorOklch: Oklch,
+  backgroundLuminance: number,
   targetContrast: number
 ): Oklch {
-  // Handle invalid inputs
-  if (!textColorOklch || backgroundLuminance === undefined) {
-    return textColorOklch;
-  }
-  
-  // Clone the original color to avoid modifying it
-  const adjustedColor: Oklch = { 
-    mode: "oklch", 
-    l: textColorOklch.l, 
-    c: textColorOklch.c, 
-    h: textColorOklch.h 
-  };
-  
-  // Check if background is light or dark to determine direction
-  const isDarkBackground = backgroundLuminance < 0.5;
-  
-  // Initial text luminance
-  let textLuminance = getRelativeLuminance(adjustedColor);
-  if (textLuminance === undefined) return textColorOklch;
-  
-  // Initial contrast ratio
-  let currentContrast = calculateContrastRatio(backgroundLuminance, textLuminance);
-  
-  // Iteratively adjust lightness to improve contrast
+  if (!textColorOklch || backgroundLuminance === undefined) return textColorOklch;
+
+  const adjustedColor = { ...textColorOklch }; // Clone
+  const isDarkBackground = backgroundLuminance < 0.5; // Target direction
+  let currentLuminance = getRelativeLuminance(adjustedColor);
+
+  if (currentLuminance === undefined) return textColorOklch; // Cannot adjust if luminance fails
+
+  let currentContrast = calculateContrastRatio(currentLuminance, backgroundLuminance);
   let iterations = 0;
-  let step = 0.05; // Initial step size
-  
+  const step = 0.05; // Adjust step size if needed
+
   while (currentContrast < targetContrast && iterations < MAX_CONTRAST_ITERATIONS) {
-    // Adjust lightness in appropriate direction
-    if (isDarkBackground) {
-      // For dark backgrounds, make text lighter
+    // Adjust lightness L
+    if (isDarkBackground) { // Need lighter text
       adjustedColor.l = Math.min(1, adjustedColor.l + step);
-    } else {
-      // For light backgrounds, make text darker
+    } else { // Need darker text
       adjustedColor.l = Math.max(0, adjustedColor.l - step);
     }
-    
-    // Recalculate luminance and contrast
-    textLuminance = getRelativeLuminance(adjustedColor) || textLuminance;
-    currentContrast = calculateContrastRatio(backgroundLuminance, textLuminance);
-    
-    // Reduce step size as we get closer
-    if (iterations > 5) step = 0.025;
-    
+
+    // Recalculate and check again
+    currentLuminance = getRelativeLuminance(adjustedColor);
+    if (currentLuminance === undefined) break; // Stop if conversion fails
+    currentContrast = calculateContrastRatio(currentLuminance, backgroundLuminance);
     iterations++;
   }
-  
-  if (isDev && iterations >= MAX_CONTRAST_ITERATIONS) {
-    console.warn('[EyeLove CS] Max iterations reached adjusting contrast. Achieved:', currentContrast.toFixed(2));
+
+  if (isDev && iterations >= MAX_CONTRAST_ITERATIONS && currentContrast < targetContrast) {
+    console.warn(`[EyeLove CS] Max iterations reached adjusting contrast for L=${textColorOklch.l.toFixed(2)}. Target: ${targetContrast}:1, Achieved: ${currentContrast.toFixed(2)}:1`);
+    // Option: Force to max/min lightness if target not met?
+    // adjustedColor.l = isDarkBackground ? 0.95 : 0.05;
   } else if (isDev && iterations > 0) {
-    console.debug(`[EyeLove CS] Contrast improved from ${currentContrast.toFixed(2)} to target ${targetContrast} in ${iterations} iterations`);
+     console.debug(`[EyeLove CS] Contrast adjusted in ${iterations} iterations. Final: ${currentContrast.toFixed(2)}:1`);
   }
-  
+
   return adjustedColor;
 }
 
@@ -294,6 +279,7 @@ function applyDarkModeStyles() {
           let finalBackgroundL = 0.2; // Default assumed dark background lightness
           let backgroundLuminance: number | undefined;
           const isButton = data.element.tagName === 'BUTTON'; // Check if it's a button
+          let finalBgOklch: Oklch | undefined; // Store the final background color
 
           // Process Background Color
           const parsedBg = data.originalBg ? culori.parse(data.originalBg) : undefined;
@@ -319,22 +305,24 @@ function applyDarkModeStyles() {
                  targetC = Math.max(0, targetC); // Use adjusted targetC for buttons
 
                  finalBackgroundL = targetL; // Store the final target lightness
-                 const darkOklchBg: Oklch = { mode: "oklch", l: finalBackgroundL, c: targetC, h: newH };
-                 backgroundLuminance = getRelativeLuminance(darkOklchBg);
-                 newBg = culori.formatHex(darkOklchBg);
+                 finalBgOklch = { mode: "oklch", l: finalBackgroundL, c: targetC, h: newH };
+                 backgroundLuminance = getRelativeLuminance(finalBgOklch);
+                 newBg = culori.formatHex(finalBgOklch);
              } else if (oklchBg) {
                  // Original was dark or near-dark, store its lightness/luminance for text contrast check
                  finalBackgroundL = oklchBg.l;
-                 backgroundLuminance = getRelativeLuminance(oklchBg);
+                 finalBgOklch = oklchBg; // Use original dark color
+                 backgroundLuminance = getRelativeLuminance(finalBgOklch);
                  // Do NOT set newBg - let it keep its original dark color
              }
           } else {
              // Background was transparent, semi-transparent, or unparseable
-             // Do NOT set newBg. Assume it should inherit or remain transparent.
+             // DO NOT set newBg. Assume it should inherit or remain transparent.
              // Estimate background luminance as dark for text contrast checks if needed.
              finalBackgroundL = 0.2; // Default dark assumption
-             backgroundLuminance = getRelativeLuminance({ mode: 'oklch', l: finalBackgroundL, c: 0, h: 0 }); // Approx luminance
-             if (isDev && parsedBg) console.debug('[EyeLove CS] Skipping background override for (semi-)transparent element:', data.element, `alpha: ${parsedBg.alpha}`);
+             finalBgOklch = { mode: 'oklch', l: finalBackgroundL, c: 0, h: 0 };
+             backgroundLuminance = getRelativeLuminance(finalBgOklch) ?? 0.1; // Use default luminance
+             if (isDev && parsedBg) console.debug('[EyeLove CS] Using estimated dark luminance for element:', data.element);
           }
           // --- End Refined Check ---
 
@@ -349,15 +337,6 @@ function applyDarkModeStyles() {
           if (parsedColor && (parsedColor.alpha ?? 1) > 0.5) { // Ignore transparent text
              const initialOklchText = culori.oklch(parsedColor);
              if (initialOklchText) {
-                 // Get initial text luminance
-                 const initialTextLuminance = getRelativeLuminance(initialOklchText);
-                 
-                 // Calculate initial contrast
-                 let currentContrast = 1;
-                 if (initialTextLuminance !== undefined && backgroundLuminance !== undefined) {
-                   currentContrast = calculateContrastRatio(initialTextLuminance, backgroundLuminance);
-                 }
-                 
                  // Initial transformation
                  let newL = 1.0 - initialOklchText.l; // Invert lightness
                  let newC = initialOklchText.c * (isButton ? 0.5 : 0.3); // Less chroma reduction for button text
@@ -378,23 +357,21 @@ function applyDarkModeStyles() {
                  // Check contrast of the transformed color
                  const transformedTextLuminance = getRelativeLuminance(transformedTextColor);
                  if (transformedTextLuminance !== undefined) {
-                   currentContrast = calculateContrastRatio(transformedTextLuminance, backgroundLuminance);
+                   const currentContrast = calculateContrastRatio(transformedTextLuminance, backgroundLuminance);
                    
                    // If contrast doesn't meet WCAG AA standards (4.5:1), adjust it
                    if (currentContrast < TARGET_CONTRAST) {
                      if (isDev) console.debug(
-                       `[EyeLove CS] Insufficient contrast (${currentContrast.toFixed(2)}:1), adjusting...`
+                       `[EyeLove CS] Insufficient text contrast (${currentContrast.toFixed(2)}:1), adjusting...`, 
+                       data.element
                      );
                      
                      // Use helper function to improve contrast
-                     const adjustedColor = adjustTextLightnessForContrast(
+                     transformedTextColor = adjustTextLightnessForContrast(
                        transformedTextColor, 
                        backgroundLuminance, 
                        TARGET_CONTRAST
                      );
-                     
-                     // Replace the original transformedTextColor with the adjusted one
-                     transformedTextColor = adjustedColor;
                    }
                  }
                  
@@ -419,25 +396,30 @@ function applyDarkModeStyles() {
                           newL = Math.max(0, Math.min(1, newL));
                           newC = Math.max(0, newC);
                           
-                          // Apply similar contrast logic to fills (lighter for dark backgrounds, darker for light)
-                          // Use a specific target for button icons
-                          const svgContrastTargetL = finalBackgroundL < 0.5 ? 0.70 : 0.30;
-                          
-                          if (finalBackgroundL < 0.5) {
-                              newL = Math.max(newL, svgContrastTargetL); // Lighter fill on dark background
-                          } else {
-                              newL = Math.min(newL, svgContrastTargetL); // Darker fill on light background
-                          }
-                          
-                          const darkOklchFill: Oklch = { 
+                          // Create transformed fill color with contrast check
+                          let transformedFillColor: Oklch = { 
                               mode: "oklch", 
                               l: newL, 
                               c: newC, 
                               h: newH 
                           };
                           
+                          // Check contrast against background
+                          const initialFillLuminance = getRelativeLuminance(transformedFillColor);
+                          if (initialFillLuminance !== undefined) {
+                              const currentContrast = calculateContrastRatio(initialFillLuminance, backgroundLuminance);
+                              if (currentContrast < TARGET_CONTRAST) { // Use same target for now
+                                if (isDev) console.debug(`[EyeLove CS] Insufficient fill contrast (${currentContrast.toFixed(2)}:1), adjusting...`, data.element);
+                                transformedFillColor = adjustTextLightnessForContrast(
+                                  transformedFillColor, 
+                                  backgroundLuminance, 
+                                  TARGET_CONTRAST
+                                );
+                              }
+                          }
+                          
                           // Generate hex color
-                          newFill = culori.formatHex(darkOklchFill);
+                          newFill = culori.formatHex(transformedFillColor);
                       }
                   }
               } catch (e) {
@@ -461,24 +443,30 @@ function applyDarkModeStyles() {
                           newL = Math.max(0, Math.min(1, newL));
                           newC = Math.max(0, newC);
                           
-                          // Make strokes more visible based on background
-                          const svgContrastTargetL = finalBackgroundL < 0.5 ? 0.70 : 0.30;
-                          
-                          if (finalBackgroundL < 0.5) {
-                              newL = Math.max(newL, svgContrastTargetL); // Lighter stroke on dark background
-                          } else {
-                              newL = Math.min(newL, svgContrastTargetL); // Darker stroke on light background
-                          }
-                          
-                          const darkOklchStroke: Oklch = { 
+                          // Create transformed stroke color with contrast check
+                          let transformedStrokeColor: Oklch = { 
                               mode: "oklch", 
                               l: newL, 
                               c: newC, 
                               h: newH 
                           };
                           
+                          // Check contrast against background
+                          const initialStrokeLuminance = getRelativeLuminance(transformedStrokeColor);
+                          if (initialStrokeLuminance !== undefined) {
+                              const currentContrast = calculateContrastRatio(initialStrokeLuminance, backgroundLuminance);
+                              if (currentContrast < TARGET_CONTRAST) { // Use same target for now
+                                if (isDev) console.debug(`[EyeLove CS] Insufficient stroke contrast (${currentContrast.toFixed(2)}:1), adjusting...`, data.element);
+                                transformedStrokeColor = adjustTextLightnessForContrast(
+                                  transformedStrokeColor, 
+                                  backgroundLuminance, 
+                                  TARGET_CONTRAST
+                                );
+                              }
+                          }
+                          
                           // Generate hex color
-                          newStroke = culori.formatHex(darkOklchStroke);
+                          newStroke = culori.formatHex(transformedStrokeColor);
                       }
                   }
               } catch (e) {
@@ -629,36 +617,41 @@ function removeDarkModeStyles() {
   const inlineStyledElements = document.querySelectorAll('[data-eyelove-styled="inline"]');
   
   if (inlineStyledElements.length > 0) {
-      if (isDev) console.log(`[EyeLove CS] Removing inline styles from ${inlineStyledElements.length} elements`);
+      if (isDev) console.log(`[EyeLove CS Cleanup] Removing inline styles from ${inlineStyledElements.length} elements`);
       
       inlineStyledElements.forEach(element => {
           if (element instanceof HTMLElement || element instanceof SVGElement) {
               // Retrieve original style
               const originalStyle = elementOriginalStyles.get(element as HTMLElement);
               
+              // --- Add Debug Logging Here ---
+              if (isDev) {
+                  console.debug(`[EyeLove CS Cleanup] Processing element:`, element);
+                  console.debug(`[EyeLove CS Cleanup]   Original style retrieved from WeakMap:`, originalStyle);
+              }
+              // --- End Debug Logging ---
+              
               // Restore original style state
               if (originalStyle !== undefined) {
                   if (originalStyle !== null) {
-                      // Element had a style attribute before - restore it
+                      if (isDev) console.debug(`[EyeLove CS Cleanup]   Restoring style attribute to: "${originalStyle}"`);
                       element.setAttribute('style', originalStyle);
                   } else {
-                      // Element had no style attribute before - remove it completely
+                      if (isDev) console.debug('[EyeLove CS Cleanup]   Original style was null, removing attribute.');
                       element.removeAttribute('style');
                   }
                   // Clean up WeakMap entry
                   elementOriginalStyles.delete(element as HTMLElement);
               } else {
-                  // Fallback if we somehow don't have the original style
-                  // (shouldn't happen, but just in case)
-                  element.removeAttribute('style');
-                  
-                  // Alternative fallback: remove individual properties
-                  element.style.removeProperty('background-color');
-                  element.style.removeProperty('color');
-                  element.style.removeProperty('fill');
-                  element.style.removeProperty('stroke');
-                  
-                  if (isDev) console.warn('[EyeLove CS] Missing original style for element:', element);
+                  // Fallback / Error case
+                  if (isDev) console.warn('[EyeLove CS Cleanup] Missing original style in WeakMap for element:', element);
+                  // Attempt cleanup by removing attribute as fallback
+                   element.removeAttribute('style');
+                   // Fallback: remove individual properties (optional, maybe redundant now)
+                   // (element as HTMLElement).style.removeProperty('background-color');
+                   // (element as HTMLElement).style.removeProperty('color');
+                   // (element as HTMLElement).style.removeProperty('fill');
+                   // (element as HTMLElement).style.removeProperty('stroke');
               }
               
               // Remove our marker
@@ -755,6 +748,7 @@ function applyStylesToElementAndChildren(element: Element) {
       let finalBackgroundL = 0.2; // Default assumed dark background lightness
       let backgroundLuminance: number | undefined;
       const isButton = data.element.tagName === 'BUTTON'; // Check if it's a button
+      let finalBgOklch: Oklch | undefined; // Store the final background color
 
       // Process Background Color
       const parsedBg = data.originalBg ? culori.parse(data.originalBg) : undefined;
@@ -780,32 +774,24 @@ function applyStylesToElementAndChildren(element: Element) {
           targetC = Math.max(0, targetC); // Use adjusted targetC for buttons
 
           finalBackgroundL = targetL; // Store the final target lightness
-          
-          const darkOklchBg: Oklch = { 
-            mode: "oklch", 
-            l: finalBackgroundL, 
-            c: targetC, 
-            h: newH 
-          };
-          
-          // Calculate background luminance for contrast checks
-          backgroundLuminance = getRelativeLuminance(darkOklchBg);
-          
-          // Generate the hex color
-          newBg = culori.formatHex(darkOklchBg);
+          finalBgOklch = { mode: "oklch", l: finalBackgroundL, c: targetC, h: newH };
+          backgroundLuminance = getRelativeLuminance(finalBgOklch);
+          newBg = culori.formatHex(finalBgOklch);
         } else if (oklchBg) {
           // Original was dark or near-dark, store its lightness/luminance for text contrast check
           finalBackgroundL = oklchBg.l;
-          backgroundLuminance = getRelativeLuminance(oklchBg);
+          finalBgOklch = oklchBg; // Use original dark color
+          backgroundLuminance = getRelativeLuminance(finalBgOklch);
           // Do NOT set newBg - let it keep its original dark color
         }
       } else {
         // Background was transparent, semi-transparent, or unparseable
-        // Do NOT set newBg. Assume it should inherit or remain transparent.
+        // DO NOT set newBg. Assume it should inherit or remain transparent.
         // Estimate background luminance as dark for text contrast checks if needed.
         finalBackgroundL = 0.2; // Default dark assumption
-        backgroundLuminance = getRelativeLuminance({ mode: 'oklch', l: finalBackgroundL, c: 0, h: 0 }); // Approx luminance
-        if (isDev && parsedBg) console.debug('[EyeLove CS] Skipping background override for (semi-)transparent element:', data.element, `alpha: ${parsedBg.alpha}`);
+        finalBgOklch = { mode: 'oklch', l: finalBackgroundL, c: 0, h: 0 };
+        backgroundLuminance = getRelativeLuminance(finalBgOklch) ?? 0.1; // Use default luminance
+        if (isDev && parsedBg) console.debug('[EyeLove CS] Using estimated dark luminance for element:', data.element);
       }
       // --- End Refined Check ---
       
@@ -820,25 +806,39 @@ function applyStylesToElementAndChildren(element: Element) {
       if (parsedColor && (parsedColor.alpha ?? 1) > 0.5) {
         const oklchColor = culori.oklch(parsedColor);
         if (oklchColor) {
+          // Initial transformation
           let newL = 1.0 - oklchColor.l;
           let newC = oklchColor.c * (isButton ? 0.5 : 0.3); // Less chroma reduction for button text
           const newH = oklchColor.h || 0;
           
+          // Basic clamping
           newL = Math.max(0, Math.min(1, newL));
           newC = Math.max(0, newC);
           
-          // Apply contrast adjustment
-          // For buttons, use specific contrast targets
-          const contrastTarget = finalBackgroundL < 0.5 ? 0.75 : 0.25;
+          // Create transformed text color with contrast check
+          let transformedTextColor: Oklch = { 
+            mode: "oklch", 
+            l: newL, 
+            c: newC, 
+            h: newH 
+          };
           
-          if (finalBackgroundL < 0.5) {
-            newL = Math.max(newL, contrastTarget); // Light text on dark background
-          } else {
-            newL = Math.min(newL, contrastTarget); // Dark text on light background
+          // Check contrast against background
+          const textLuminance = getRelativeLuminance(transformedTextColor);
+          if (textLuminance !== undefined) {
+            const currentContrast = calculateContrastRatio(textLuminance, backgroundLuminance);
+            if (currentContrast < TARGET_CONTRAST) {
+              if (isDev) console.debug(`[EyeLove CS] Insufficient text contrast (${currentContrast.toFixed(2)}:1), adjusting...`, data.element);
+              transformedTextColor = adjustTextLightnessForContrast(
+                transformedTextColor, 
+                backgroundLuminance, 
+                TARGET_CONTRAST
+              );
+            }
           }
           
-          const darkOklchText: Oklch = { mode: "oklch", l: newL, c: newC, h: newH };
-          newColor = culori.formatHex(darkOklchText);
+          // Generate hex color
+          newColor = culori.formatHex(transformedTextColor);
         }
       }
       
@@ -858,24 +858,30 @@ function applyStylesToElementAndChildren(element: Element) {
               newL = Math.max(0, Math.min(1, newL));
               newC = Math.max(0, newC);
               
-              // Apply similar contrast logic to fills (lighter for dark backgrounds, darker for light)
-              // Use a specific target for button icons
-              const svgContrastTargetL = finalBackgroundL < 0.5 ? 0.70 : 0.30;
-              
-              if (finalBackgroundL < 0.5) {
-                newL = Math.max(newL, svgContrastTargetL); // Lighter fill on dark background
-              } else {
-                newL = Math.min(newL, svgContrastTargetL); // Darker fill on light background
-              }
-              
-              const darkOklchFill: Oklch = { 
+              // Create transformed fill color with contrast check
+              let transformedFillColor: Oklch = { 
                 mode: "oklch", 
                 l: newL, 
                 c: newC, 
                 h: newH 
               };
               
-              newFill = culori.formatHex(darkOklchFill);
+              // Check contrast against background
+              const fillLuminance = getRelativeLuminance(transformedFillColor);
+              if (fillLuminance !== undefined) {
+                const currentContrast = calculateContrastRatio(fillLuminance, backgroundLuminance);
+                if (currentContrast < TARGET_CONTRAST) { // Use same target for now
+                  if (isDev) console.debug(`[EyeLove CS] Insufficient fill contrast (${currentContrast.toFixed(2)}:1), adjusting...`, data.element);
+                  transformedFillColor = adjustTextLightnessForContrast(
+                    transformedFillColor, 
+                    backgroundLuminance, 
+                    TARGET_CONTRAST
+                  );
+                }
+              }
+              
+              // Generate hex color
+              newFill = culori.formatHex(transformedFillColor);
             }
           }
         } catch (e) {
@@ -899,23 +905,30 @@ function applyStylesToElementAndChildren(element: Element) {
               newL = Math.max(0, Math.min(1, newL));
               newC = Math.max(0, newC);
               
-              // Make strokes more visible
-              const svgContrastTargetL = finalBackgroundL < 0.5 ? 0.70 : 0.30;
-              
-              if (finalBackgroundL < 0.5) {
-                newL = Math.max(newL, svgContrastTargetL); // Lighter stroke on dark background
-              } else {
-                newL = Math.min(newL, svgContrastTargetL); // Darker stroke on light background
-              }
-              
-              const darkOklchStroke: Oklch = { 
+              // Create transformed stroke color with contrast check
+              let transformedStrokeColor: Oklch = { 
                 mode: "oklch", 
                 l: newL, 
                 c: newC, 
                 h: newH 
               };
               
-              newStroke = culori.formatHex(darkOklchStroke);
+              // Check contrast against background
+              const strokeLuminance = getRelativeLuminance(transformedStrokeColor);
+              if (strokeLuminance !== undefined) {
+                const currentContrast = calculateContrastRatio(strokeLuminance, backgroundLuminance);
+                if (currentContrast < TARGET_CONTRAST) { // Use same target for now
+                  if (isDev) console.debug(`[EyeLove CS] Insufficient stroke contrast (${currentContrast.toFixed(2)}:1), adjusting...`, data.element);
+                  transformedStrokeColor = adjustTextLightnessForContrast(
+                    transformedStrokeColor, 
+                    backgroundLuminance, 
+                    TARGET_CONTRAST
+                  );
+                }
+              }
+              
+              // Generate hex color
+              newStroke = culori.formatHex(transformedStrokeColor);
             }
           }
         } catch (e) {
