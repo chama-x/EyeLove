@@ -55,7 +55,19 @@ export function getManifest(): ManifestV3 {
     host_permissions: [
       '<all_urls>'
     ],
-    // web_accessible_resources: [ /* ... */ ],
+    web_accessible_resources: [
+      {
+        resources: [
+          // Use wildcards for built assets
+          'assets/schemas-*.js',
+          'assets/src/content-scripts/main-*.js',
+          'assets/src/content-scripts/fouc-handler-*.js', 
+          'assets/src/background/index-*.js',
+          'assets/*.css'
+        ],
+        matches: ['<all_urls>'] // Keep broad matches or restrict if possible later
+      }
+    ],
     // content_security_policy: { /* ... */ },
     // commands: { /* ... */ },
     // minimum_chrome_version: '100', // Example

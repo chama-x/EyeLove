@@ -23,12 +23,13 @@ export default defineConfig({
     webExtension({
       // Use the function to get the manifest object
       manifest: getManifest(),
-      // Only list HTML files as additional inputs
+      // Explicitly list HTML source files for the build process
       additionalInputs: {
         html: [
           'src/pages/popup/index.html',
           'src/pages/options/index.html',
         ]
+        // No 'scripts' or 'styles' needed here if plugin handles manifest entries
       },
       // Recommended setting for Manifest V3 WAR handling
       useDynamicUrlWebAccessibleResources: true,
@@ -51,7 +52,19 @@ export default defineConfig({
     outDir: 'dist',
     emptyOutDir: true, // Clean dist folder before build
     rollupOptions: {
-      // REMOVED the output: { ... } block from here
+      // Explicitly define HTML inputs for Vite/Rollup build
+      input: {
+        popup: path.resolve(__dirname, 'src/pages/popup/index.html'),
+        options: path.resolve(__dirname, 'src/pages/options/index.html'),
+        // Note: Background/Content scripts are usually handled by the webExtension plugin
+        // and don't need to be listed here unless issues arise.
+      },
+      // Keep the output configuration from before (optional, but good for structure)
+      output: {
+        entryFileNames: 'assets/[name]-[hash].js',
+        chunkFileNames: 'assets/[name]-[hash].js',
+        assetFileNames: 'assets/[name]-[hash].[ext]',
+      },
     },
   },
 });

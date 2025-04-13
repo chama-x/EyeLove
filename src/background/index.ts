@@ -15,7 +15,7 @@ async function getSettings(): Promise<Partial<Settings>> {
 }
 
 // Function to send message to active tab's content script
-async function sendMessageToActiveTab(message: any) {
+async function sendMessageToActiveTab(message: { action: string; payload?: Record<string, unknown> }) {
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
   if (tabs[0]?.id) {
     try {
